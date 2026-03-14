@@ -1,5 +1,6 @@
-local main = require("mutate4lua.main")
-local runner = require("mutate4lua.runner")
+local main = require("mutate4lua.cli")
+local mutate4lua = require("mutate4lua")
+local runner = require("mutate4lua.legacy.runner")
 local util = require("mutate4lua.util")
 
 local function buffer()
@@ -33,6 +34,14 @@ test("runner normalizes coverage paths", function()
   assert_equal(true, coverage["src/demo/flag.lua:3"])
   assert_equal(true, coverage["src/demo/flag.lua:4"])
   assert_equal(true, coverage["src/demo/flag.lua:5"])
+end)
+
+test("engine resolution prefers explicit environment path", function()
+  local root = temp_dir()
+  local custom = util.join_path(root, "bin/custom-engine")
+  write(custom, "#!/bin/sh\nexit 0\n")
+  local resolved = assert(mutate4lua.resolve_engine({binary_path = custom}))
+  assert_equal(util.absolute_path(custom), resolved)
 end)
 
 test("baseline coverage cache skips rerunning unchanged baseline", function()

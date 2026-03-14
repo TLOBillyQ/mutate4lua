@@ -1,10 +1,10 @@
 #!/usr/bin/env lua
 package.path = table.concat({
-  "src/?.lua",
-  "src/?/init.lua",
+  "lua/?.lua",
+  "lua/?/init.lua",
   package.path,
 }, ";")
-local engine = require("mutate4lua.engine")
+local engine = require("mutate4lua")
 local handle = assert(io.popen("pwd", "r"))
 local cwd = handle:read("*l")
 handle:close()

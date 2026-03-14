@@ -1,11 +1,11 @@
-local manifest = require("mutate4lua.manifest")
-local project = require("mutate4lua.project")
-local report = require("mutate4lua.report")
-local runner = require("mutate4lua.runner")
-local scanner = require("mutate4lua.scanner")
-local selection = require("mutate4lua.selection")
+local manifest = require("mutate4lua.legacy.manifest")
+local project = require("mutate4lua.legacy.project")
+local report = require("mutate4lua.legacy.report")
+local runner = require("mutate4lua.legacy.runner")
+local scanner = require("mutate4lua.legacy.scanner")
+local selection = require("mutate4lua.legacy.selection")
 local util = require("mutate4lua.util")
-local main = {}
+local cli = {}
 local module_path = debug.getinfo(1, "S").source:sub(2)
 local tool_root = util.parent_dir(util.parent_dir(util.parent_dir(util.absolute_path(module_path))))
 local usage_text = [[
@@ -246,10 +246,10 @@ local function default_baseline_command(coverage_file, analysis, relative_file)
   args[#args + 1] = coverage_file
   return args
 end
-function main.usage()
+function cli.usage()
   return usage_text
 end
-function main.run(argv, workspace_root, out, err)
+function cli.run(argv, workspace_root, out, err)
   workspace_root = workspace_root or util.absolute_path(".")
   out = out or io.stdout
   err = err or io.stderr
@@ -418,4 +418,4 @@ function main.run(argv, workspace_root, out, err)
   cleanup()
   return result
 end
-return main
+return cli

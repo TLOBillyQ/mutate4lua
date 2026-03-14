@@ -1,10 +1,12 @@
 # mutate4lua
 
 `mutate4lua` is a standalone mutation-testing tool for Lua projects.
-It now uses a two-layer architecture:
+It now uses a Lua-first layout with a Go execution engine:
 
-- `cmd/mutate4lua-go/` - Go performance engine for scan/mutate/index commands
-- `src/mutate4lua/` - Lua compatibility modules and legacy in-process core
+- `lua/mutate4lua/` - public Lua package, default driver, and legacy Lua helpers
+- `cmd/mutate4lua-engine/` - Go engine entrypoint
+- `internal/` - Go engine implementation packages
+- `tools/process_helper.py` - Python helper used by the legacy Lua runtime
 - `bin/mutate4lua` - Lua wrapper that resolves/builds the Go engine and forwards CLI calls
 
 For a requested Lua source file, `mutate4lua`:
@@ -47,11 +49,11 @@ lua bin/mutate4lua src/demo/flag.lua --test-command "busted"
 
 The Lua wrapper resolves the Go engine in this order:
 
-1. `MUTATE4LUA_GO_BIN`
-2. `bin/mutate4lua-go`
-3. local `go build -o bin/mutate4lua-go ./cmd/mutate4lua-go`
+1. `MUTATE4LUA_ENGINE_BIN`
+2. `bin/mutate4lua-engine`
+3. local `go build -o bin/mutate4lua-engine ./cmd/mutate4lua-engine`
 
-When `--test-command` is not provided, `mutate4lua` runs the bundled `scripts/test_driver.lua`.
+When `--test-command` is not provided, `mutate4lua` runs the bundled `lua/mutate4lua/driver/default.lua` driver.
 The default driver:
 
 - discovers test files under `spec/`, `test/`, and `tests/`

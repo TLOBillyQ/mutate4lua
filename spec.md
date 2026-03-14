@@ -2,9 +2,9 @@
 
 `mutate4lua` is a mutation-testing tool for Lua source code.
 
-It uses a Lua compatibility layer plus a Go execution engine. The Go engine is the
-canonical implementation for CLI scan/mutate/index commands; the Lua layer retains
-legacy modules and the default Lua-side test driver.
+It uses a Lua-first package layout plus a Go execution engine. The Go engine is the
+canonical implementation for CLI `scan`, `mutate`, `update-manifest`, and `index-suites`
+commands; the Lua package provides the public wrapper, default driver, and archived legacy helpers.
 
 It shall:
 - accept exactly one Lua source file as its target
@@ -28,6 +28,12 @@ Supported forms:
 - `mutate4lua <file.lua> --test-command CMD`
 - `mutate4lua <file.lua> --verbose`
 - `mutate4lua --help`
+
+The internal Go engine also supports:
+- `mutate4lua-engine scan --target <file.lua>`
+- `mutate4lua-engine mutate --target <file.lua>`
+- `mutate4lua-engine update-manifest --target <file.lua>`
+- `mutate4lua-engine index-suites --lane behavior`
 
 Defaults:
 - timeout factor: `10`

@@ -8,7 +8,7 @@ local function normalize_coverage_key(line)
   return util.normalize_relative_path(path) .. ":" .. line_number
 end
 local function helper_path(tool_root)
-  return util.join_path(tool_root, "scripts", "process_helper.py")
+  return util.join_path(tool_root, "tools", "process_helper.py")
 end
 local function load_lua_table(path)
   local chunk, err = loadfile(path)

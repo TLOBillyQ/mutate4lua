@@ -1,11 +1,25 @@
-package main
+package report
 
 import (
 	"fmt"
 	"strings"
+
+	"github.com/billyq/mutate4lua/internal/analysis"
+	mutruntime "github.com/billyq/mutate4lua/internal/runtime"
 )
 
-func scanReport(relativeFile string, sites []mutationSite, changedScopeIDs map[string]bool) string {
+type DiagnosticsInput struct {
+	TotalMutationSites           int
+	CoveredCount                 int
+	UncoveredCount               int
+	ChangedMutationSites         int
+	ManifestExists               bool
+	ProjectHashChanged           bool
+	DifferentialSurfaceArea      int
+	ManifestViolatingSurfaceArea int
+}
+
+func ScanReport(relativeFile string, sites []analysis.MutationSite, changedScopeIDs map[string]bool) string {
 	lines := []string{fmt.Sprintf("Scan: %d mutation sites in %s", len(sites), relativeFile)}
 	for _, site := range sites {
 		marker := "  "
@@ -20,26 +34,26 @@ func scanReport(relativeFile string, sites []mutationSite, changedScopeIDs map[s
 	return strings.Join(lines, "\n") + "\n"
 }
 
-func diagnosticsReport(selection selectionResult, mutationWarning int) string {
+func DiagnosticsReport(input DiagnosticsInput, mutationWarning int) string {
 	lines := []string{
-		fmt.Sprintf("Total mutation sites: %d", selection.TotalMutationSites),
-		fmt.Sprintf("Covered mutation sites: %d", len(selection.Covered)),
-		fmt.Sprintf("Uncovered mutation sites: %d", len(selection.Uncovered)),
-		fmt.Sprintf("Changed mutation sites: %d", selection.ChangedMutationSites),
-		fmt.Sprintf("Manifest exists: %t", selection.ManifestExists),
-		fmt.Sprintf("Project hash changed: %t", selection.ProjectHashChanged),
-		fmt.Sprintf("Differential surface area: %d", selection.DifferentialSurfaceArea),
-		fmt.Sprintf("Manifest-violating surface area: %d", selection.ManifestViolatingSurfaceArea),
+		fmt.Sprintf("Total mutation sites: %d", input.TotalMutationSites),
+		fmt.Sprintf("Covered mutation sites: %d", input.CoveredCount),
+		fmt.Sprintf("Uncovered mutation sites: %d", input.UncoveredCount),
+		fmt.Sprintf("Changed mutation sites: %d", input.ChangedMutationSites),
+		fmt.Sprintf("Manifest exists: %t", input.ManifestExists),
+		fmt.Sprintf("Project hash changed: %t", input.ProjectHashChanged),
+		fmt.Sprintf("Differential surface area: %d", input.DifferentialSurfaceArea),
+		fmt.Sprintf("Manifest-violating surface area: %d", input.ManifestViolatingSurfaceArea),
 	}
-	if len(selection.Covered) == 0 {
+	if input.CoveredCount == 0 {
 		lines = append(lines, "No mutations need testing.")
-	} else if len(selection.Covered) > mutationWarning {
-		lines = append(lines, fmt.Sprintf("WARNING: Found %d mutations. Consider splitting this module.", len(selection.Covered)))
+	} else if input.CoveredCount > mutationWarning {
+		lines = append(lines, fmt.Sprintf("WARNING: Found %d mutations. Consider splitting this module.", input.CoveredCount))
 	}
 	return strings.Join(lines, "\n") + "\n"
 }
 
-func runReport(relativeFile string, baseline runResult, diagnostics string, uncovered []mutationSite, results []jobResult) string {
+func RunReport(relativeFile string, baseline mutruntime.RunResult, diagnostics string, uncovered []analysis.MutationSite, results []mutruntime.JobResult) string {
 	lines := []string{fmt.Sprintf("Baseline tests passed in %d ms.", baseline.DurationMS), strings.TrimSuffix(diagnostics, "\n")}
 	for _, site := range uncovered {
 		lines = append(lines, fmt.Sprintf("UNCOVERED %s:%d %s", relativeFile, site.Line, site.Description))

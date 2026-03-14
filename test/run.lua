@@ -1,6 +1,6 @@
 package.path = table.concat({
-  "src/?.lua",
-  "src/?/init.lua",
+  "lua/?.lua",
+  "lua/?/init.lua",
   package.path,
 }, ";")
 local tests = {}

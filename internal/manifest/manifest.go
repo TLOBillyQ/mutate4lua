@@ -1,43 +1,51 @@
-package main
+package manifest
 
 import (
-	"fmt"
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/billyq/mutate4lua/internal/analysis"
+	mutruntime "github.com/billyq/mutate4lua/internal/runtime"
 )
 
 const embeddedManifestStart = "--[[ mutate4lua-manifest\n"
 const embeddedManifestEnd = "]]"
 
+type Data struct {
+	Version     int                  `json:"version"`
+	ProjectHash string               `json:"project_hash"`
+	Scopes      []analysis.ScopeInfo `json:"scopes"`
+}
+
 func embeddedManifestStartIndex(source string) int {
-	source = normalizeNewlines(source)
+	source = mutruntime.NormalizeNewlines(source)
 	marker := strings.Index(source, embeddedManifestStart)
 	if marker < 0 {
 		return -1
 	}
-	tail := trim(source[marker:])
+	tail := mutruntime.Trim(source[marker:])
 	if !strings.HasSuffix(tail, embeddedManifestEnd) {
 		return -1
 	}
 	return marker
 }
 
-func stripEmbeddedManifest(source string) string {
-	source = normalizeNewlines(source)
+func StripEmbedded(source string) string {
+	source = mutruntime.NormalizeNewlines(source)
 	index := embeddedManifestStartIndex(source)
 	if index < 0 {
 		return source
 	}
-	stripped := trim(source[:index])
+	stripped := mutruntime.Trim(source[:index])
 	if stripped == "" {
 		return ""
 	}
 	return stripped + "\n"
 }
 
-func readEmbeddedManifest(source string) (*manifestData, error) {
-	source = normalizeNewlines(source)
+func ReadEmbedded(source string) (*Data, error) {
+	source = mutruntime.NormalizeNewlines(source)
 	start := embeddedManifestStartIndex(source)
 	if start < 0 {
 		return nil, nil
@@ -46,8 +54,8 @@ func readEmbeddedManifest(source string) (*manifestData, error) {
 	if stop < 0 {
 		return nil, nil
 	}
-	body := trim(source[start+len(embeddedManifestStart) : start+stop])
-	data := manifestData{Version: 1, Scopes: []scopeInfo{}}
+	body := mutruntime.Trim(source[start+len(embeddedManifestStart) : start+stop])
+	data := Data{Version: 1, Scopes: []analysis.ScopeInfo{}}
 	scopeMap := map[int]map[string]string{}
 	for _, line := range strings.Split(body, "\n") {
 		if line == "" {
@@ -92,7 +100,7 @@ func readEmbeddedManifest(source string) (*manifestData, error) {
 		}
 		startLine, _ := strconv.Atoi(scope["startLine"])
 		endLine, _ := strconv.Atoi(scope["endLine"])
-		data.Scopes = append(data.Scopes, scopeInfo{
+		data.Scopes = append(data.Scopes, analysis.ScopeInfo{
 			ID:           scope["id"],
 			Kind:         scope["kind"],
 			StartLine:    startLine,
@@ -103,62 +111,38 @@ func readEmbeddedManifest(source string) (*manifestData, error) {
 	return &data, nil
 }
 
-func manifestSidecarPath(projectRoot, relativeFile string) string {
-	normalized := normalizeRelativePath(relativeFile)
+func SidecarPath(projectRoot, relativeFile string) string {
+	normalized := mutruntime.NormalizeRelativePath(relativeFile)
 	return filepath.Join(projectRoot, ".mutate4lua", "manifests", normalized+".json")
 }
 
-func loadManifest(projectRoot, targetPath, relativeFile, rawSource string) (*manifestData, error) {
-	sidecar := manifestSidecarPath(projectRoot, relativeFile)
-	if fileExists(sidecar) {
-		var data manifestData
-		if err := readJSONFile(sidecar, &data); err != nil {
+func Load(projectRoot, targetPath, relativeFile, rawSource string) (*Data, error) {
+	sidecar := SidecarPath(projectRoot, relativeFile)
+	if mutruntime.FileExists(sidecar) {
+		var data Data
+		if err := mutruntime.ReadJSONFile(sidecar, &data); err != nil {
 			return nil, err
 		}
 		return &data, nil
 	}
-	embedded, err := readEmbeddedManifest(rawSource)
+	embedded, err := ReadEmbedded(rawSource)
 	if err != nil || embedded == nil {
 		return embedded, err
 	}
-	if err := writeJSONFile(sidecar, embedded); err != nil {
+	if err := mutruntime.WriteJSONFile(sidecar, embedded); err != nil {
 		return nil, err
 	}
 	return embedded, nil
 }
 
-func writeManifest(projectRoot, relativeFile string, analysis analysisResult) error {
-	path := manifestSidecarPath(projectRoot, relativeFile)
-	data := manifestData{Version: 1, ProjectHash: analysis.ProjectHash, Scopes: analysis.Scopes}
+func Write(projectRoot, relativeFile string, result analysis.Result) error {
+	path := SidecarPath(projectRoot, relativeFile)
+	data := Data{Version: 1, ProjectHash: result.ProjectHash, Scopes: result.Scopes}
 	for i := range data.Scopes {
 		data.Scopes[i].StartPos = 0
 		data.Scopes[i].EndPos = 0
 		data.Scopes[i].File = ""
 		data.Scopes[i].RelativeFile = ""
 	}
-	return writeJSONFile(path, data)
-}
-
-func migrateManifest(projectRoot, targetPath string) (string, error) {
-	absoluteTarget, err := filepath.Abs(targetPath)
-	if err != nil {
-		return "", err
-	}
-	relativeFile, err := filepath.Rel(projectRoot, absoluteTarget)
-	if err != nil {
-		return "", err
-	}
-	relativeFile = normalizeRelativePath(relativeFile)
-	rawSource, err := readFile(absoluteTarget)
-	if err != nil {
-		return "", err
-	}
-	manifest, err := loadManifest(projectRoot, absoluteTarget, relativeFile, rawSource)
-	if err != nil {
-		return "", err
-	}
-	if manifest == nil {
-		return fmt.Sprintf("No manifest found for %s\n", relativeFile), nil
-	}
-	return fmt.Sprintf("Updated manifest for %s\n", relativeFile), nil
+	return mutruntime.WriteJSONFile(path, data)
 }

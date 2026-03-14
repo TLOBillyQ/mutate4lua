@@ -1,5 +1,5 @@
 local function parse_args(argv)
-  local args = {root = ".", coverage_file = nil, tool_root = "."}
+  local args = {root = ".", coverage_file = nil, tool_root = ".", quiet = false}
   local index = 1
   while index <= #argv do
     local token = argv[index]
@@ -12,6 +12,10 @@ local function parse_args(argv)
     elseif token == "--tool-root" then
       index = index + 1
       args.tool_root = argv[index]
+    elseif token == "--no-coverage" then
+      args.coverage_file = nil
+    elseif token == "--quiet" then
+      args.quiet = true
     else
       error("Unknown test driver option: " .. tostring(token))
     end
@@ -22,14 +26,14 @@ end
 local function run()
   local args = parse_args(arg)
   package.path = table.concat({
-    args.tool_root .. "/src/?.lua",
-    args.tool_root .. "/src/?/init.lua",
-    "src/?.lua",
-    "src/?/init.lua",
+    args.tool_root .. "/lua/?.lua",
+    args.tool_root .. "/lua/?/init.lua",
+    "lua/?.lua",
+    "lua/?/init.lua",
     "?.lua",
     package.path,
   }, ";")
-  local project = require("mutate4lua.project")
+  local project = require("mutate4lua.legacy.project")
   local util = require("mutate4lua.util")
   local root = util.absolute_path(args.root)
   local files = project.discover_test_files(root)

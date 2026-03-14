@@ -1,9 +1,9 @@
-GO_BIN := bin/mutate4lua-go
+ENGINE_BIN := bin/mutate4lua-engine
 
-.PHONY: build-go test-go test-lua test
+.PHONY: build-engine test-go test-lua test
 
-build-go:
-	go build -o $(GO_BIN) ./cmd/mutate4lua-go
+build-engine:
+	go build -o $(ENGINE_BIN) ./cmd/mutate4lua-engine
 
 test-go:
 	go test ./...

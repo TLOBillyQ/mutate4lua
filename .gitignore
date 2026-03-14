@@ -4,5 +4,5 @@
 .luacov
 .luacov.*
 __pycache__/
-bin/mutate4lua-go
-bin/mutate4lua-go.exe
+bin/mutate4lua-engine
+bin/mutate4lua-engine.exe

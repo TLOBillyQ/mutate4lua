@@ -16,7 +16,7 @@ local function _repo_root()
 end
 
 local function _binary_name()
-  return "mutate4lua-go"
+  return "mutate4lua-engine"
 end
 
 local function _binary_path()
@@ -29,12 +29,12 @@ end
 
 local function _build_binary(path)
   if not util.command_succeeds("command -v go >/dev/null 2>&1") then
-    return nil, "go command not found; build mutate4lua with `go build -o " .. tostring(path) .. " ./cmd/mutate4lua-go`"
+    return nil, "go command not found; build mutate4lua with `go build -o " .. tostring(path) .. " ./cmd/mutate4lua-engine`"
   end
   util.mkdir_p(util.parent_dir(path))
   local command = table.concat({
     "cd", util.shell_quote(_repo_root()), "&&",
-    "go build -o", util.shell_quote(path), util.shell_quote("./cmd/mutate4lua-go"),
+    "go build -o", util.shell_quote(path), util.shell_quote("./cmd/mutate4lua-engine"),
   }, " ")
   local output, err = util.capture(command)
   if output == nil then
@@ -45,7 +45,7 @@ end
 
 function engine.resolve_binary(env)
   env = env or {}
-  local explicit = env.binary_path or os.getenv("MUTATE4LUA_GO_BIN")
+  local explicit = env.binary_path or os.getenv("MUTATE4LUA_ENGINE_BIN")
   if explicit and explicit ~= "" then
     local path = util.absolute_path(explicit)
     if util.is_file(path) then
