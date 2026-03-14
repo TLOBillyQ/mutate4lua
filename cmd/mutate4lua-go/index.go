@@ -55,8 +55,8 @@ func selectSuitesForTarget(index *suiteIndex, targetFile string) []string {
 	return selected
 }
 
-func commandSuiteSelection(projectRoot, lane, mode, projectHash, targetFile string) ([]string, error) {
-	if lane != "behavior" {
+func commandSuiteSelection(projectRoot, driverScript, lane, mode, projectHash, targetFile string) ([]string, error) {
+	if lane != "behavior" || trim(driverScript) == "" {
 		return nil, nil
 	}
 	index, err := loadSuiteIndex(projectRoot, lane, mode, projectHash)
@@ -70,7 +70,10 @@ func commandSuiteSelection(projectRoot, lane, mode, projectHash, targetFile stri
 	return selected, nil
 }
 
-func runIndexSuites(projectRoot, lane, mode string, jsonOutput bool) (string, int, error) {
+func runIndexSuites(projectRoot, driverScript, lane, mode string, jsonOutput bool) (string, int, error) {
+	if trim(driverScript) == "" {
+		return "index-suites requires --driver-script\n", 1, nil
+	}
 	if lane != "behavior" {
 		return "index-suites only supports behavior lane\n", 1, nil
 	}
@@ -79,14 +82,14 @@ func runIndexSuites(projectRoot, lane, mode string, jsonOutput bool) (string, in
 		return "", 1, err
 	}
 	projectHashValue := fnv1a64Hex(joinStrings(files, "\n"))
-	suites, err := listSuites(projectRoot, lane, mode)
+	suites, err := listSuites(projectRoot, driverScript, lane, mode)
 	if err != nil {
 		return "", 1, err
 	}
 	index := suiteIndex{Lane: lane, Mode: mode, ProjectHash: projectHashValue, Suites: map[string][]string{}}
 	for _, suite := range suites {
 		coverageFile := filepath.Join(projectRoot, ".mutate4lua", "tmp", fnv1a64Hex(suite)+".coverage")
-		args := []string{"lua", driverPath(projectRoot), "--lane", lane, "--coverage-file", coverageFile, "--suite-module", suite, "--quiet"}
+		args := []string{"lua", driverPath(projectRoot, driverScript), "--lane", lane, "--coverage-file", coverageFile, "--suite-module", suite, "--quiet"}
 		if mode != "" {
 			args = append(args, "--mode", mode)
 		}

@@ -12,6 +12,7 @@ type coreOptions struct {
 	Target          string
 	Lane            string
 	Mode            string
+	DriverScript    string
 	Scan            bool
 	UpdateManifest  bool
 	SinceLastRun    bool
@@ -52,7 +53,7 @@ func driverSuites(projectRoot string, analysis analysisResult, opts coreOptions)
 	if opts.TestCommand != "" {
 		return nil, nil
 	}
-	return commandSuiteSelection(projectRoot, opts.Lane, opts.Mode, analysis.ProjectHash, analysis.RelativeFile)
+	return commandSuiteSelection(projectRoot, opts.DriverScript, opts.Lane, opts.Mode, analysis.ProjectHash, analysis.RelativeFile)
 }
 
 func baselineKey(projectHash, lane, mode, targetFile, suiteFingerprint string) string {
@@ -130,7 +131,7 @@ func runScanOrMutate(workspaceRoot string, opts coreOptions) (string, int, error
 			shell = true
 		} else {
 			tempCoverage = filepath.Join(projectRoot, ".mutate4lua", "cache", "baseline", cacheKey+".coverage")
-			baselineArgs, tempSuiteList, err = buildDefaultDriverCommand(projectRoot, opts.Lane, opts.Mode, analysis.RelativeFile, analysis.ProjectHash, tempCoverage, suites, true)
+			baselineArgs, tempSuiteList, err = buildDefaultDriverCommand(projectRoot, opts.DriverScript, opts.Lane, opts.Mode, analysis.RelativeFile, analysis.ProjectHash, tempCoverage, suites, true)
 			if err != nil {
 				return "", 1, err
 			}
@@ -174,7 +175,7 @@ func runScanOrMutate(workspaceRoot string, opts coreOptions) (string, int, error
 		commandArgs = []string{opts.TestCommand}
 		commandShell = true
 	} else {
-		commandArgs, tempSuiteList, err = buildDefaultDriverCommand(projectRoot, opts.Lane, opts.Mode, analysis.RelativeFile, analysis.ProjectHash, "", suites, true)
+		commandArgs, tempSuiteList, err = buildDefaultDriverCommand(projectRoot, opts.DriverScript, opts.Lane, opts.Mode, analysis.RelativeFile, analysis.ProjectHash, "", suites, true)
 		if err != nil {
 			return "", 1, err
 		}

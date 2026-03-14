@@ -62,6 +62,7 @@ func runCoreCommand(command string, argv []string) int {
 	target := flags.String("target", "", "target lua file")
 	lane := flags.String("lane", "behavior", "lane")
 	mode := flags.String("mode", "", "mode")
+	driverScript := flags.String("driver-script", "", "driver script")
 	linesFlag := flags.String("lines", "", "lines")
 	sinceLastRun := flags.Bool("since-last-run", false, "since last run")
 	mutateAll := flags.Bool("mutate-all", false, "mutate all")
@@ -92,6 +93,7 @@ func runCoreCommand(command string, argv []string) int {
 		Target:          *target,
 		Lane:            *lane,
 		Mode:            *mode,
+		DriverScript:    *driverScript,
 		Scan:            command == "scan",
 		UpdateManifest:  command == "migrate-manifest",
 		SinceLastRun:    *sinceLastRun,
@@ -116,6 +118,7 @@ func runIndexCommand(argv []string) int {
 	flags := flag.NewFlagSet("index-suites", flag.ContinueOnError)
 	lane := flags.String("lane", "behavior", "lane")
 	mode := flags.String("mode", "", "mode")
+	driverScript := flags.String("driver-script", "", "driver script")
 	jsonOutput := flags.Bool("json", false, "json output")
 	flags.SetOutput(os.Stderr)
 	if err := flags.Parse(argv); err != nil {
@@ -123,7 +126,7 @@ func runIndexCommand(argv []string) int {
 	}
 	cwd, _ := os.Getwd()
 	projectRoot := cwd
-	output, code, err := runIndexSuites(projectRoot, *lane, *mode, *jsonOutput)
+	output, code, err := runIndexSuites(projectRoot, *driverScript, *lane, *mode, *jsonOutput)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err.Error())
 		return 1
