@@ -4,9 +4,8 @@ package.path = table.concat({
   "src/?/init.lua",
   package.path,
 }, ";")
-local main = require("mutate4lua.main")
+local engine = require("mutate4lua.engine")
 local handle = assert(io.popen("pwd", "r"))
 local cwd = handle:read("*l")
 handle:close()
-local exit_code = main.run(arg, cwd, io.stdout, io.stderr)
-os.exit(exit_code)
+os.exit(engine.run(arg, cwd, io.stdout, io.stderr))
