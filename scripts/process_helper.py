@@ -84,38 +84,58 @@ def ignore_filter(_directory, names):
     return ignored
 def copy_project(source_root: Path, destination_root: Path):
     shutil.copytree(source_root, destination_root, ignore=ignore_filter, dirs_exist_ok=True)
-def run_single_mutation(
+def reset_workspace(destination_root: Path):
+    shutil.rmtree(destination_root / ".mutate4lua", ignore_errors=True)
+    shutil.rmtree(destination_root / "__pycache__", ignore_errors=True)
+    shutil.rmtree(destination_root / ".pytest_cache", ignore_errors=True)
+    for pattern in (".coverage*", ".luacov*"):
+        for path in destination_root.glob(pattern):
+            if path.is_dir():
+                shutil.rmtree(path, ignore_errors=True)
+            else:
+                path.unlink(missing_ok=True)
+def run_worker_batch(
     worker_root: Path,
     project_root: Path,
     target_file: str,
     command: str | None,
     command_args: list[str] | None,
     timeout_seconds: float,
-    job: dict,
+    jobs: list[dict],
     verbose: bool,
     total: int,
 ):
     worker_root.mkdir(parents=True, exist_ok=True)
     temp_root = Path(tempfile.mkdtemp(prefix="mutate4lua-", dir=str(worker_root)))
+    results = []
     try:
         copy_project(project_root, temp_root)
-        target_path = temp_root / target_file
-        target_path.parent.mkdir(parents=True, exist_ok=True)
-        target_path.write_text(job["mutated_source"], encoding="utf-8")
-        if verbose:
-            print(f"Worker starting {job['site_index']}/{total}: {job['description']}", flush=True)
-        result = run_command(temp_root, command, command_args, timeout_seconds)
-        if verbose:
-            status = "KILLED" if result["timed_out"] or result["exit_code"] != 0 else "SURVIVED"
-            print(f"Worker finished {job['site_index']}/{total}: {status}", flush=True)
-        result.update({
-            "site_index": job["site_index"],
-            "line": job["line"],
-            "description": job["description"],
-        })
-        return result
+        for job in jobs:
+            reset_workspace(temp_root)
+            target_path = temp_root / target_file
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            target_path.write_text(job["mutated_source"], encoding="utf-8")
+            if verbose:
+                print(f"Worker starting {job['site_index']}/{total}: {job['description']}", flush=True)
+            result = run_command(temp_root, command, command_args, timeout_seconds)
+            if verbose:
+                status = "KILLED" if result["timed_out"] or result["exit_code"] != 0 else "SURVIVED"
+                print(f"Worker finished {job['site_index']}/{total}: {status}", flush=True)
+            result.update({
+                "site_index": job["site_index"],
+                "line": job["line"],
+                "description": job["description"],
+            })
+            results.append(result)
+        return results
     finally:
         shutil.rmtree(temp_root, ignore_errors=True)
+def partition_jobs(jobs: list[dict], bucket_count: int):
+    bucket_count = max(1, bucket_count)
+    buckets = [[] for _ in range(bucket_count)]
+    for index, job in enumerate(jobs):
+        buckets[index % bucket_count].append(job)
+    return [bucket for bucket in buckets if bucket]
 def handle_run(config: dict, output: Path):
     result = run_command(
         Path(config["cwd"]),
@@ -131,24 +151,25 @@ def handle_mutate_batch(config: dict, output: Path):
     jobs = config.get("jobs", [])
     results = []
     max_workers = max(1, int(config.get("max_workers", 1)))
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+    batches = partition_jobs(jobs, min(max_workers, len(jobs))) if jobs else []
+    with ThreadPoolExecutor(max_workers=max(1, len(batches))) as executor:
         futures = [
             executor.submit(
-                run_single_mutation,
+                run_worker_batch,
                 worker_root,
                 project_root,
                 config["target_file"],
                 config.get("command"),
                 config.get("command_args"),
                 config.get("timeout_seconds") or 1,
-                job,
+                batch,
                 bool(config.get("verbose")),
                 len(jobs),
             )
-            for job in jobs
+            for batch in batches
         ]
         for future in as_completed(futures):
-            results.append(future.result())
+            results.extend(future.result())
     write_output(output, {"results": results})
 def main():
     parser = argparse.ArgumentParser()

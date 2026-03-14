@@ -170,6 +170,58 @@ local function sorted_results(batch_results)
   end)
   return batch_results
 end
+local function command_signature(command)
+  if type(command) == "table" then
+    return table.concat(command, "\0")
+  end
+  return tostring(command or "")
+end
+local function load_lua_value(path)
+  local chunk, load_err = loadfile(path)
+  if not chunk then
+    return nil, load_err
+  end
+  local ok, value = pcall(chunk)
+  if not ok then
+    return nil, value
+  end
+  return value
+end
+local function baseline_cache_key(project_hash, command)
+  return util.fnv1a64((project_hash or "") .. "\0" .. command_signature(command))
+end
+local function baseline_cache_paths(project_root, cache_key)
+  local root = util.join_path(project_root, ".mutate4lua", "cache", "baseline")
+  return {
+    root = root,
+    coverage = util.join_path(root, cache_key .. ".coverage"),
+    meta = util.join_path(root, cache_key .. ".meta.lua"),
+  }
+end
+local function load_baseline_cache(project_root, cache_key)
+  local paths = baseline_cache_paths(project_root, cache_key)
+  if not util.is_file(paths.coverage) or not util.is_file(paths.meta) then
+    return nil
+  end
+  local meta, load_err = load_lua_value(paths.meta)
+  if not meta then
+    util.remove(paths.meta)
+    return nil, load_err
+  end
+  return {
+    coverage_path = paths.coverage,
+    duration_ms = tonumber(meta.duration_ms) or 0,
+  }
+end
+local function write_baseline_cache(project_root, cache_key, baseline, coverage_path)
+  if not cache_key or not coverage_path or not util.is_file(coverage_path) then
+    return
+  end
+  local paths = baseline_cache_paths(project_root, cache_key)
+  util.mkdir_p(paths.root)
+  assert(util.write_file(paths.coverage, assert(util.read_file(coverage_path))))
+  assert(util.write_file(paths.meta, string.format("return { duration_ms = %d }\n", baseline.duration_ms or 0)))
+end
 local function analyze_file(project_root, target_file)
   local raw_source = assert(util.read_file(target_file))
   local stripped_source = manifest.strip(raw_source)
@@ -185,8 +237,11 @@ local function resolve_target(workspace_root, target)
   return util.absolute_path(util.join_path(workspace_root, target))
 end
 
-local function default_baseline_command(coverage_file)
-  local args = project.default_test_command(tool_root)
+local function default_baseline_command(coverage_file, analysis, relative_file)
+  local args = project.default_test_command(tool_root, {
+    target_file = relative_file,
+    project_hash = analysis and analysis.project_hash or nil,
+  })
   args[#args + 1] = "--coverage-file"
   args[#args + 1] = coverage_file
   return args
@@ -240,89 +295,120 @@ function main.run(argv, workspace_root, out, err)
   end
   local coverage_file = nil
   local baseline_command = nil
+  local coverage_cache_key = nil
   if args.test_command then
     baseline_command = args.test_command
   else
-    coverage_file = util.tmp_path(".coverage")
-    baseline_command = default_baseline_command(coverage_file)
+    baseline_command = project.default_test_command(tool_root, {
+      target_file = relative_file,
+      project_hash = analysis.project_hash,
+    })
+    coverage_cache_key = baseline_cache_key(analysis.project_hash, baseline_command)
   end
   local function cleanup()
     if coverage_file then
       util.remove(coverage_file)
+      coverage_file = nil
     end
   end
   local function execute()
-  if args.verbose then
-    write_to(out, "Baseline starting for " .. relative_file .. "\n")
-  end
-  local baseline = runner.run_command(tool_root, project_root, baseline_command, nil, coverage_file)
-  if args.verbose then
-    write_to(out, string.format("Baseline finished: exit=%d timedOut=%s duration=%d ms\n", baseline.exit_code, tostring(baseline.timed_out), baseline.duration_ms))
-  end
-  if baseline.exit_code ~= 0 or baseline.timed_out then
-    write_to(err, "Baseline tests failed.\n")
-    if baseline.output and baseline.output ~= "" then
-      write_to(err, baseline.output .. "\n")
+    local baseline = nil
+    local coverage_lines = nil
+    local baseline_cache = nil
+    if not args.test_command and coverage_cache_key then
+      baseline_cache = load_baseline_cache(project_root, coverage_cache_key)
     end
-    return 2
-  end
-  local coverage_lines = nil
-  if not args.test_command then
-    coverage_lines = runner.read_coverage(coverage_file)
-  end
-  cleanup()
-  local selection_result = selection.filter(args, analysis, previous_manifest, coverage_lines)
-  local diagnostics = report.diagnostics(selection_result, args.mutation_warning)
-  if #selection_result.covered == 0 then
-    write_to(out, report.run(relative_file, baseline, diagnostics, selection_result.uncovered, {}))
-    manifest.write(target_file, stripped_source, manifest_data(analysis))
-    return 0
-  end
-  local command = args.test_command or project.default_test_command(tool_root)
-  local timeout_seconds = math.max(1, math.ceil((baseline.duration_ms * args.timeout_factor) / 1000))
-  local jobs = {}
-  for index, site in ipairs(selection_result.covered) do
-    jobs[#jobs + 1] = {
-      site_index = index,
-      line = site.line,
-      description = site.description,
-      relative_file = relative_file,
-      mutated_source = scanner.apply_mutation(stripped_source, site),
-    }
-  end
-  if args.verbose then
-    write_to(out, string.format("Running %d mutations with %d workers.\n", #jobs, args.max_workers))
-  end
-  local batch_results = runner.run_mutations(tool_root, {
-    project_root = project_root,
-    target_file = relative_file,
-    command = command,
-    timeout_seconds = timeout_seconds,
-    max_workers = args.max_workers,
-    verbose = args.verbose,
-    jobs = jobs,
-  })
-  local results = {}
-  local survived = false
-  for _, item in ipairs(sorted_results(batch_results.results or {})) do
-    local killed = item.timed_out or item.exit_code ~= 0
-    if not killed then
-      survived = true
+    if baseline_cache then
+      if args.verbose then
+        write_to(out, "Baseline cache hit for " .. relative_file .. "\n")
+      end
+      baseline = {
+        exit_code = 0,
+        timed_out = false,
+        duration_ms = baseline_cache.duration_ms,
+        output = "",
+      }
+      coverage_lines = runner.read_coverage(baseline_cache.coverage_path)
+    else
+      if not args.test_command then
+        coverage_file = util.tmp_path(".coverage")
+        baseline_command = default_baseline_command(coverage_file, analysis, relative_file)
+      end
+      if args.verbose then
+        write_to(out, "Baseline starting for " .. relative_file .. "\n")
+      end
+      baseline = runner.run_command(tool_root, project_root, baseline_command, nil, coverage_file)
+      if args.verbose then
+        write_to(out, string.format("Baseline finished: exit=%d timedOut=%s duration=%d ms\n", baseline.exit_code, tostring(baseline.timed_out), baseline.duration_ms))
+      end
+      if baseline.exit_code ~= 0 or baseline.timed_out then
+        write_to(err, "Baseline tests failed.\n")
+        if baseline.output and baseline.output ~= "" then
+          write_to(err, baseline.output .. "\n")
+        end
+        return 2
+      end
+      if not args.test_command then
+        coverage_lines = runner.read_coverage(coverage_file)
+        write_baseline_cache(project_root, coverage_cache_key, baseline, coverage_file)
+      end
+      cleanup()
     end
-    results[#results + 1] = {
-      killed = killed,
-      timed_out = item.timed_out,
-      duration_ms = item.duration_ms,
-      line = item.line,
-      description = item.description,
-    }
-  end
-  write_to(out, report.run(relative_file, baseline, diagnostics, selection_result.uncovered, results))
-  if not survived then
-    manifest.write(target_file, stripped_source, manifest_data(analysis))
-    return 0
-  end
-  return 3
+    local selection_result = selection.filter(args, analysis, previous_manifest, coverage_lines)
+    local diagnostics = report.diagnostics(selection_result, args.mutation_warning)
+    if #selection_result.covered == 0 then
+      write_to(out, report.run(relative_file, baseline, diagnostics, selection_result.uncovered, {}))
+      manifest.write(target_file, stripped_source, manifest_data(analysis))
+      return 0
+    end
+    local command = args.test_command or project.default_test_command(tool_root, {
+      target_file = relative_file,
+      project_hash = analysis.project_hash,
+    })
+    local timeout_seconds = math.max(1, math.ceil((baseline.duration_ms * args.timeout_factor) / 1000))
+    local jobs = {}
+    for index, site in ipairs(selection_result.covered) do
+      jobs[#jobs + 1] = {
+        site_index = index,
+        line = site.line,
+        description = site.description,
+        relative_file = relative_file,
+        mutated_source = scanner.apply_mutation(stripped_source, site),
+      }
+    end
+    if args.verbose then
+      write_to(out, string.format("Running %d mutations with %d workers.\n", #jobs, args.max_workers))
+    end
+    local batch_results = runner.run_mutations(tool_root, {
+      project_root = project_root,
+      target_file = relative_file,
+      command = command,
+      timeout_seconds = timeout_seconds,
+      max_workers = args.max_workers,
+      verbose = args.verbose,
+      jobs = jobs,
+    })
+    local results = {}
+    local survived = false
+    for _, item in ipairs(sorted_results(batch_results.results or {})) do
+      local killed = item.timed_out or item.exit_code ~= 0
+      if not killed then
+        survived = true
+      end
+      results[#results + 1] = {
+        killed = killed,
+        timed_out = item.timed_out,
+        duration_ms = item.duration_ms,
+        line = item.line,
+        description = item.description,
+      }
+    end
+    write_to(out, report.run(relative_file, baseline, diagnostics, selection_result.uncovered, results))
+    if not survived then
+      manifest.write(target_file, stripped_source, manifest_data(analysis))
+      return 0
+    end
+    return 3
   end
   local ok, result = xpcall(execute, debug.traceback)
   if not ok then

@@ -1,4 +1,5 @@
 local selection = {}
+local util = require("mutate4lua.util")
 local function scope_hash_map(scopes)
   local map = {}
   for _, scope in ipairs(scopes or {}) do
@@ -93,7 +94,8 @@ function selection.filter(args, analysis, previous_manifest, coverage_lines)
     if line_selected(site) and scope_selected(site) then
       selected[#selected + 1] = site
       if coverage_lines and next(coverage_lines) ~= nil then
-        if coverage_lines[site.relative_file .. ":" .. site.line] then
+        local coverage_key = util.normalize_relative_path(site.relative_file) .. ":" .. site.line
+        if coverage_lines[coverage_key] then
           covered[#covered + 1] = site
         else
           uncovered[#uncovered + 1] = site

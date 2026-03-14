@@ -1,5 +1,12 @@
 local util = require("mutate4lua.util")
 local runner = {}
+local function normalize_coverage_key(line)
+  local path, line_number = tostring(line):match("^(.-):(%d+)$")
+  if not path then
+    return util.normalize_relative_path(line)
+  end
+  return util.normalize_relative_path(path) .. ":" .. line_number
+end
 local function helper_path(tool_root)
   return util.join_path(tool_root, "scripts", "process_helper.py")
 end
@@ -69,7 +76,7 @@ function runner.read_coverage(path)
   local content = assert(util.read_file(path))
   for line in content:gmatch("[^\n]+") do
     if line ~= "" then
-      lines[line] = true
+      lines[normalize_coverage_key(line)] = true
     end
   end
   return lines

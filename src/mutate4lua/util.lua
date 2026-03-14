@@ -16,6 +16,17 @@ end
 function util.ends_with(value, suffix)
   return suffix == "" or value:sub(-#suffix) == suffix
 end
+function util.normalize_relative_path(path)
+  local normalized = tostring(path or ""):gsub("\\", "/")
+  while util.starts_with(normalized, "./") do
+    normalized = normalized:sub(3)
+  end
+  normalized = normalized:gsub("/+", "/")
+  if normalized == "" then
+    return "."
+  end
+  return normalized
+end
 function util.read_file(path)
   local handle, err = io.open(path, "rb")
   if not handle then

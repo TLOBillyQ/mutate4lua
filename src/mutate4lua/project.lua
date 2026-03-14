@@ -65,7 +65,7 @@ function project.project_hash(project_root, target_file, stripped_source)
   end
   return util.fnv1a64(table.concat(parts))
 end
-function project.default_test_command(tool_root)
+function project.default_test_command(tool_root, _opts)
   return {
     "lua",
     util.join_path(tool_root, "scripts", "test_driver.lua"),
