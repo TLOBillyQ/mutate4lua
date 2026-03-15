@@ -1,4 +1,6 @@
 local util = {}
+local sep = package.config:sub(1, 1)
+
 local function shell_quote(value)
   value = tostring(value)
   if value:find("%z") then
@@ -6,16 +8,100 @@ local function shell_quote(value)
   end
   return "'" .. value:gsub("'", "'\\''") .. "'"
 end
-util.shell_quote = shell_quote
-function util.trim(value)
-  return (value:gsub("^%s+", ""):gsub("%s+$", ""))
+
+local function is_windows_path(path)
+  return tostring(path or ""):match("^%a:[/\\]") ~= nil
 end
+
+local function is_absolute_path(path)
+  path = tostring(path or "")
+  return path:sub(1, 1) == "/" or path:sub(1, 2) == "\\\\" or is_windows_path(path)
+end
+
+local function current_working_directory()
+  local env_pwd = os.getenv("PWD")
+  if env_pwd and env_pwd ~= "" then
+    return env_pwd
+  end
+  local command = sep == "\\" and "cd" or "pwd"
+  local output = assert(util.capture(command))
+  return util.trim(output)
+end
+
+local function split_prefix(path)
+  path = tostring(path or ""):gsub("\\", "/")
+  if path:match("^%a:/") then
+    return path:sub(1, 3), path:sub(4)
+  end
+  if path:sub(1, 2) == "//" then
+    local server, share, rest = path:match("^(//[^/]+/[^/]+)(/?)(.*)$")
+    if server then
+      return server .. "/", rest
+    end
+  end
+  if path:sub(1, 1) == "/" then
+    return "/", path:sub(2)
+  end
+  return "", path
+end
+
+local function split_segments(path)
+  local segments = {}
+  for segment in path:gmatch("[^/]+") do
+    segments[#segments + 1] = segment
+  end
+  return segments
+end
+
+local function normalize_path(path)
+  local prefix, remainder = split_prefix(path)
+  local segments = split_segments(remainder)
+  local normalized = {}
+  for _, segment in ipairs(segments) do
+    if segment == "." or segment == "" then
+      -- skip
+    elseif segment == ".." then
+      if #normalized > 0 and normalized[#normalized] ~= ".." then
+        normalized[#normalized] = nil
+      elseif prefix == "" then
+        normalized[#normalized + 1] = segment
+      end
+    else
+      normalized[#normalized + 1] = segment
+    end
+  end
+  local joined = table.concat(normalized, "/")
+  if prefix == "" then
+    return joined == "" and "." or joined
+  end
+  if joined == "" then
+    return prefix:gsub("/$", "") == "" and "/" or prefix:gsub("/$", "")
+  end
+  return prefix .. joined
+end
+
+local function lowercase_drive(path)
+  return (path:gsub("^(%a:)", string.lower))
+end
+
+util.shell_quote = shell_quote
+
+function util.trim(value)
+  return (tostring(value or ""):gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
 function util.starts_with(value, prefix)
+  value = tostring(value or "")
+  prefix = tostring(prefix or "")
   return value:sub(1, #prefix) == prefix
 end
+
 function util.ends_with(value, suffix)
+  value = tostring(value or "")
+  suffix = tostring(suffix or "")
   return suffix == "" or value:sub(-#suffix) == suffix
 end
+
 function util.normalize_relative_path(path)
   local normalized = tostring(path or ""):gsub("\\", "/")
   while util.starts_with(normalized, "./") do
@@ -27,6 +113,7 @@ function util.normalize_relative_path(path)
   end
   return normalized
 end
+
 function util.read_file(path)
   local handle, err = io.open(path, "rb")
   if not handle then
@@ -36,6 +123,7 @@ function util.read_file(path)
   handle:close()
   return data
 end
+
 function util.write_file(path, content)
   local handle, err = io.open(path, "wb")
   if not handle then
@@ -45,6 +133,7 @@ function util.write_file(path, content)
   handle:close()
   return true
 end
+
 function util.capture(command)
   local handle, err = io.popen(command, "r")
   if not handle then
@@ -60,6 +149,7 @@ function util.capture(command)
   end
   return output
 end
+
 function util.command_succeeds(command)
   local ok, kind, code = os.execute(command)
   if type(ok) == "number" then
@@ -76,66 +166,107 @@ function util.command_succeeds(command)
   end
   return false
 end
+
 function util.path_exists(path)
   return util.command_succeeds("test -e " .. shell_quote(path))
 end
+
 function util.is_file(path)
   return util.command_succeeds("test -f " .. shell_quote(path))
 end
+
 function util.is_directory(path)
   return util.command_succeeds("test -d " .. shell_quote(path))
 end
+
 function util.mkdir_p(path)
   assert(util.command_succeeds("mkdir -p " .. shell_quote(path)), "failed to create " .. path)
 end
+
 function util.remove(path)
   os.execute("rm -rf " .. shell_quote(path))
 end
+
 function util.parent_dir(path)
-  local normalized = path:gsub("/+$", "")
-  local parent = normalized:match("^(.*)/[^/]+$")
-  if not parent or parent == "" then
-    return "/"
+  local normalized = normalize_path(path):gsub("/+$", "")
+  if normalized == "." then
+    return "."
   end
-  return parent
+  local prefix, remainder = split_prefix(normalized)
+  local segments = split_segments(remainder)
+  if #segments == 0 then
+    return prefix == "" and "." or prefix:gsub("/$", "")
+  end
+  segments[#segments] = nil
+  local joined = table.concat(segments, "/")
+  if prefix == "" then
+    return joined == "" and "." or joined
+  end
+  if joined == "" then
+    return prefix:gsub("/$", "")
+  end
+  return prefix .. joined
 end
+
 function util.basename(path)
-  return path:match("([^/]+)$") or path
+  return tostring(path or ""):match("([^/]+)$") or tostring(path or "")
 end
+
 function util.join_path(...)
   local parts = {...}
   if #parts == 0 then
     return ""
   end
-  local result = parts[1]
+  local result = tostring(parts[1] or "")
   for index = 2, #parts do
-    local part = parts[index]
-    if result:sub(-1) ~= "/" then
-      result = result .. "/"
+    local part = tostring(parts[index] or "")
+    if result == "" or result:sub(-1) == "/" then
+      result = result .. part:gsub("^/+", "")
+    else
+      result = result .. "/" .. part:gsub("^/+", "")
     end
-    result = result .. part:gsub("^/+", "")
   end
   return result
 end
+
 function util.absolute_path(path)
-  local command = "python3 -c " .. shell_quote([[import os, sys
-print(os.path.abspath(sys.argv[1]))]]) .. " " .. shell_quote(path)
-  local output = assert(util.capture(command))
-  return util.trim(output)
+  path = tostring(path or "")
+  if path == "" then
+    return normalize_path(current_working_directory())
+  end
+  if is_absolute_path(path) then
+    return normalize_path(path)
+  end
+  return normalize_path(util.join_path(current_working_directory(), path))
 end
+
 function util.relative_path(root, path)
   root = util.absolute_path(root)
   path = util.absolute_path(path)
-  if path == root then
+  local root_prefix, root_remainder = split_prefix(root)
+  local path_prefix, path_remainder = split_prefix(path)
+  if lowercase_drive(root_prefix) ~= lowercase_drive(path_prefix) then
+    return path
+  end
+  local root_segments = split_segments(root_remainder)
+  local path_segments = split_segments(path_remainder)
+  local index = 1
+  while root_segments[index] and path_segments[index] and root_segments[index] == path_segments[index] do
+    index = index + 1
+  end
+  local parts = {}
+  for _ = index, #root_segments do
+    parts[#parts + 1] = ".."
+  end
+  for segment_index = index, #path_segments do
+    parts[#parts + 1] = path_segments[segment_index]
+  end
+  if #parts == 0 then
     return "."
   end
-  if util.starts_with(path, root .. "/") then
-    return path:sub(#root + 2)
-  end
-  local command = "python3 -c " .. shell_quote([[import os, sys
-print(os.path.relpath(sys.argv[2], sys.argv[1]))]]) .. " " .. shell_quote(root) .. " " .. shell_quote(path)
-  return util.trim(assert(util.capture(command)))
+  return table.concat(parts, "/")
 end
+
 function util.list_files(root, include_patterns)
   include_patterns = include_patterns or {"*.lua"}
   local tests = {}
@@ -152,11 +283,13 @@ function util.list_files(root, include_patterns)
   end
   return files
 end
+
 function util.find_first(root, expression)
   local command = "find " .. shell_quote(root) .. " -maxdepth 1 " .. expression .. " | head -1"
   local output = assert(util.capture(command))
   return util.trim(output)
 end
+
 function util.tmp_path(suffix)
   local base = os.tmpname()
   if suffix and suffix ~= "" then
@@ -164,6 +297,7 @@ function util.tmp_path(suffix)
   end
   return base
 end
+
 function util.deepcopy(value)
   if type(value) ~= "table" then
     return value
@@ -174,9 +308,11 @@ function util.deepcopy(value)
   end
   return copy
 end
+
 function util.escape_lua_string(value)
   return string.format("%q", value)
 end
+
 local function encode_json(value)
   local value_type = type(value)
   if value_type == "nil" then
@@ -223,12 +359,15 @@ local function encode_json(value)
   table.sort(parts)
   return "{" .. table.concat(parts, ",") .. "}"
 end
+
 function util.write_json(path, value)
   assert(util.write_file(path, encode_json(value)))
 end
+
 function util.normalize_newlines(value)
-  return value:gsub("\r\n", "\n")
+  return tostring(value or ""):gsub("\r\n", "\n")
 end
+
 function util.split_lines(value)
   local lines = {}
   value = util.normalize_newlines(value)
@@ -240,47 +379,37 @@ function util.split_lines(value)
   end
   return lines
 end
+
 function util.fnv1a64(text)
   local native_bitops = pcall(function()
     return load("return (0 ~ 0) == 0 and (0 & 0) == 0")()
   end)
-  if native_bitops then
-    local hash = 0xcbf29ce484222325
-    local prime = 0x100000001b3
-    for index = 1, #text do
-      hash = hash ~ text:byte(index)
-      hash = (hash * prime) & 0xFFFFFFFFFFFFFFFF
-    end
-    return string.format("%016x", hash)
+  if not native_bitops then
+    error("fnv1a64 requires Lua with native bitwise operators")
   end
-  local input_path = util.tmp_path(".txt")
-  assert(util.write_file(input_path, text))
-  local command = "python3 -c " .. shell_quote([[import sys
-offset = 0xcbf29ce484222325
-prime = 0x100000001b3
-with open(sys.argv[1], "rb") as handle:
-    data = handle.read()
-value = offset
-for byte in data:
-    value ^= byte
-    value = (value * prime) & 0xFFFFFFFFFFFFFFFF
-print(f"{value:016x}")]]) .. " " .. shell_quote(input_path)
-  local output = assert(util.capture(command))
-  util.remove(input_path)
-  return util.trim(output)
+  local hash = 0xcbf29ce484222325
+  local prime = 0x100000001b3
+  for index = 1, #text do
+    hash = hash ~ text:byte(index)
+    hash = (hash * prime) & 0xFFFFFFFFFFFFFFFF
+  end
+  return string.format("%016x", hash)
 end
+
 function util.default_max_workers()
-  local command = "python3 -c " .. shell_quote([[import os
-count = os.cpu_count() or 1
-print(max(1, count // 2))]])
-  local output = util.capture(command)
-  if not output then
-    return 1
+  local candidates = {
+    os.getenv("NUMBER_OF_PROCESSORS"),
+    util.capture("getconf _NPROCESSORS_ONLN 2>/dev/null"),
+    util.capture("nproc 2>/dev/null"),
+    util.capture("sysctl -n hw.ncpu 2>/dev/null"),
+  }
+  for _, candidate in ipairs(candidates) do
+    local value = tonumber(util.trim(candidate or ""))
+    if value and value >= 1 then
+      return math.max(1, math.floor(value / 2))
+    end
   end
-  local value = tonumber(util.trim(output))
-  if not value or value < 1 then
-    return 1
-  end
-  return value
+  return 1
 end
+
 return util

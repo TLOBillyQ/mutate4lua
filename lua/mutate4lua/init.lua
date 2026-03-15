@@ -5,5 +5,4 @@ return {
   run = engine_bridge.run,
   resolve_engine = engine_bridge.resolve_binary,
   usage = cli.usage,
-  run_legacy = cli.run,
 }

@@ -3,10 +3,9 @@
 `mutate4lua` is a standalone mutation-testing tool for Lua projects.
 It now uses a Lua-first layout with a Go execution engine:
 
-- `lua/mutate4lua/` - public Lua package, default driver, and legacy Lua helpers
+- `lua/mutate4lua/` - public Lua package, default driver, and internal pure-Lua helpers
 - `cmd/mutate4lua-engine/` - Go engine entrypoint
 - `internal/` - Go engine implementation packages
-- `tools/process_helper.py` - Python helper used by the legacy Lua runtime
 - `bin/mutate4lua` - Lua wrapper that resolves/builds the Go engine and forwards CLI calls
 
 For a requested Lua source file, `mutate4lua`:
@@ -77,7 +76,6 @@ The manifest is stored as a footer block at the end of the target file.
 
 - Lua
 - Go 1.22+
-- Python 3
 - a shell environment with `find`, `mkdir`, and `rm`
 
 ## Tests

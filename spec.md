@@ -4,7 +4,7 @@
 
 It uses a Lua-first package layout plus a Go execution engine. The Go engine is the
 canonical implementation for CLI `scan`, `mutate`, `update-manifest`, and `index-suites`
-commands; the Lua package provides the public wrapper, default driver, and archived legacy helpers.
+commands; the Lua package provides the public wrapper, default driver, and archived pure-Lua helpers.
 
 It shall:
 - accept exactly one Lua source file as its target

@@ -33,7 +33,7 @@ local function run()
     "?.lua",
     package.path,
   }, ";")
-  local project = require("mutate4lua.legacy.project")
+  local project = require("mutate4lua.driver.project")
   local util = require("mutate4lua.util")
   local root = util.absolute_path(args.root)
   local files = project.discover_test_files(root)

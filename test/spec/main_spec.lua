@@ -1,9 +1,9 @@
-local main = require("mutate4lua.cli")
 local mutate4lua = require("mutate4lua")
-local manifest = require("mutate4lua.legacy.manifest")
-local scanner = require("mutate4lua.legacy.scanner")
-local lexer = require("mutate4lua.legacy.lexer")
+local manifest = require("mutate4lua.internal.manifest")
+local scanner = require("mutate4lua.internal.scanner")
+local lexer = require("mutate4lua.internal.lexer")
 local util = require("mutate4lua.util")
+
 local function buffer()
   local pieces = {}
   return {
@@ -15,29 +15,19 @@ local function buffer()
     end,
   }
 end
+
 local function temp_dir()
   local path = util.tmp_path(".dir")
   util.remove(path)
   util.mkdir_p(path)
   return path
 end
+
 local function write(path, content)
   util.mkdir_p(util.parent_dir(path))
   assert(util.write_file(path, content))
 end
-local function write_passing_project(root)
-  write(util.join_path(root, "src/demo/flag.lua"), [[
-local M = {}
-function M.enabled()
-  return true
-end
-return M
-]])
-  write(util.join_path(root, "test/flag_test.lua"), [[
-local flag = dofile("src/demo/flag.lua")
-assert(flag.enabled() == true)
-]])
-end
+
 test("scanner discovers operators and skips comments", function()
   local source = [[
 local value = 0 -- true == false
@@ -74,6 +64,7 @@ test("lexer parses hex, binary, and exponent numbers", function()
   assert_equal("0b1010", numbers[2])
   assert_equal("1.5e-3", numbers[3])
 end)
+
 test("manifest roundtrip strips footer", function()
   local path = util.tmp_path(".lua")
   write(path, "return true\n")
@@ -90,63 +81,30 @@ test("manifest roundtrip strips footer", function()
   local stripped = manifest.strip(assert(util.read_file(path)))
   assert_equal("return true\n", stripped)
 end)
-test("public package exposes run and usage from lua layout", function()
+
+test("public package exposes thin wrapper surface", function()
+  local keys = {}
+  for key in pairs(mutate4lua) do
+    keys[#keys + 1] = key
+  end
+  table.sort(keys)
   assert_equal("function", type(mutate4lua.run))
   assert_equal("function", type(mutate4lua.usage))
+  assert_equal("function", type(mutate4lua.resolve_engine))
+  assert_equal("resolve_engine,run,usage", table.concat(keys, ","))
   assert_contains(mutate4lua.usage(), "mutate4lua <file.lua>")
 end)
-test("mutates a real lua project", function()
+
+test("public run delegates directly to the configured engine binary", function()
   local root = temp_dir()
-  write_passing_project(root)
+  local fake_engine = util.join_path(root, "fake-engine.sh")
+  write(fake_engine, "#!/bin/sh\nprintf 'ENGINE %s\\n' \"$*\"\n")
+  assert(util.command_succeeds("chmod +x " .. util.shell_quote(fake_engine)))
+
   local out = buffer()
   local err = buffer()
-  local exit = main.run({"src/demo/flag.lua"}, root, out, err)
+  local exit = mutate4lua.run({"help"}, util.absolute_path("."), out, err, {binary_path = fake_engine})
   assert_equal(0, exit)
-  assert_contains(out.text(), "KILLED src/demo/flag.lua:3 replace true with false")
-  assert_contains(out.text(), "Summary: 1 killed, 0 survived, 1 total.")
-  assert_equal("", err.text())
-end)
-test("fails fast when baseline tests are red", function()
-  local root = temp_dir()
-  write_passing_project(root)
-  write(util.join_path(root, "test/flag_test.lua"), [[
-local flag = dofile("src/demo/flag.lua")
-assert(flag.enabled() == false)
-]])
-  local out = buffer()
-  local err = buffer()
-  local exit = main.run({"src/demo/flag.lua"}, root, out, err)
-  assert_equal(2, exit)
-  assert_contains(err.text(), "Baseline tests failed.")
-end)
-test("updates manifest without running tests", function()
-  local root = temp_dir()
-  write_passing_project(root)
-  write(util.join_path(root, "test/flag_test.lua"), [[
-assert(false)
-]])
-  local out = buffer()
-  local err = buffer()
-  local exit = main.run({"src/demo/flag.lua", "--update-manifest"}, root, out, err)
-  assert_equal(0, exit)
-  assert_contains(out.text(), "Updated manifest for src/demo/flag.lua")
-  assert_equal("", err.text())
-  assert_contains(assert(util.read_file(util.join_path(root, "src/demo/flag.lua"))), "mutate4lua-manifest")
-end)
-test("scan marks changed scopes when manifest differs", function()
-  local root = temp_dir()
-  write_passing_project(root)
-  local first_out = buffer()
-  local first_err = buffer()
-  assert_equal(0, main.run({"src/demo/flag.lua", "--update-manifest"}, root, first_out, first_err))
-  local path = util.join_path(root, "src/demo/flag.lua")
-  local current = assert(util.read_file(path))
-  current = current:gsub("return true", "return false")
-  write(path, current)
-  local out = buffer()
-  local err = buffer()
-  local exit = main.run({"src/demo/flag.lua", "--scan"}, root, out, err)
-  assert_equal(0, exit)
-  assert_contains(out.text(), "* src/demo/flag.lua:3 replace false with true")
-  assert_contains(out.text(), "* indicates a scope that differs from the embedded manifest.")
+  assert_contains(out:text(), "ENGINE help")
+  assert_equal("", err:text())
 end)

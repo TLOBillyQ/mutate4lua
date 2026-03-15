@@ -1,4 +1,4 @@
-local lexer = require("mutate4lua.legacy.lexer")
+local lexer = require("mutate4lua.internal.lexer")
 local util = require("mutate4lua.util")
 local scanner = {}
 local binary_replacements = {
