@@ -20,6 +20,12 @@ type SuiteIndex struct {
 	Suites      map[string][]string `json:"suites"`
 }
 
+type suiteFileMapPayload struct {
+	Lane       string              `json:"lane"`
+	Mode       string              `json:"mode"`
+	SuiteFiles map[string][]string `json:"suite_files"`
+}
+
 func Path(projectRoot, driverScript string) string {
 	if mutruntime.Trim(driverScript) != "" {
 		if filepath.IsAbs(driverScript) {
@@ -170,6 +176,45 @@ func selectSuitesForTarget(index *SuiteIndex, targetFile string) []string {
 	return selected
 }
 
+func suiteMapIndex(projectRoot, driverScript, lane, mode, projectHash string) (*SuiteIndex, error) {
+	if mutruntime.Trim(driverScript) == "" {
+		return nil, nil
+	}
+
+	args := []string{"lua", Path(projectRoot, driverScript), "--lane", lane, "--emit-suite-file-map-json", "--json"}
+	if mode != "" {
+		args = append(args, "--mode", mode)
+	}
+	result := mutruntime.RunCommand(projectRoot, args, 0, false)
+	if result.ExitCode != 0 {
+		return nil, nil
+	}
+
+	var payload suiteFileMapPayload
+	if err := json.Unmarshal([]byte(result.Output), &payload); err != nil {
+		return nil, nil
+	}
+	if payload.SuiteFiles == nil {
+		return nil, nil
+	}
+
+	index := &SuiteIndex{
+		Lane:        lane,
+		Mode:        mode,
+		ProjectHash: projectHash,
+		Suites:      map[string][]string{},
+	}
+	for suite, files := range payload.SuiteFiles {
+		normalized := []string{}
+		for _, file := range files {
+			normalized = append(normalized, mutruntime.NormalizeRelativePath(file))
+		}
+		sort.Strings(normalized)
+		index.Suites[suite] = mutruntime.DedupeStrings(normalized)
+	}
+	return index, nil
+}
+
 func CommandSuiteSelection(projectRoot, driverScript, lane, mode, projectHash, targetFile string) ([]string, error) {
 	if lane != "behavior" || mutruntime.Trim(driverScript) == "" {
 		return nil, nil
@@ -197,36 +242,42 @@ func RunIndexSuites(projectRoot, driverScript, lane, mode string, jsonOutput boo
 		return "", 1, err
 	}
 	projectHashValue := mutruntime.FNV1a64Hex(mutruntime.JoinStrings(files, "\n"))
-	suites, err := ListSuites(projectRoot, driverScript, lane, mode)
+	index, err := suiteMapIndex(projectRoot, driverScript, lane, mode, projectHashValue)
 	if err != nil {
 		return "", 1, err
 	}
-	index := SuiteIndex{Lane: lane, Mode: mode, ProjectHash: projectHashValue, Suites: map[string][]string{}}
-	for _, suite := range suites {
-		coverageFile := filepath.Join(projectRoot, ".mutate4lua", "tmp", mutruntime.FNV1a64Hex(suite)+".coverage")
-		args := []string{"lua", Path(projectRoot, driverScript), "--lane", lane, "--coverage-file", coverageFile, "--suite-module", suite, "--quiet"}
-		if mode != "" {
-			args = append(args, "--mode", mode)
+	if index == nil {
+		suites, listErr := ListSuites(projectRoot, driverScript, lane, mode)
+		if listErr != nil {
+			return "", 1, listErr
 		}
-		result := mutruntime.RunCommand(projectRoot, args, 0, false)
-		if result.ExitCode != 0 {
-			return "", 1, fmt.Errorf("index suite %s failed: %s", suite, result.Output)
-		}
-		coverageLines, err := ReadCoverageLines(coverageFile)
-		_ = os.Remove(coverageFile)
-		if err != nil {
-			return "", 1, err
-		}
-		coveredFiles := []string{}
-		for line := range coverageLines {
-			file := line
-			if idx := mutruntime.LastIndexByte(line, ':'); idx >= 0 {
-				file = line[:idx]
+		index = &SuiteIndex{Lane: lane, Mode: mode, ProjectHash: projectHashValue, Suites: map[string][]string{}}
+		for _, suite := range suites {
+			coverageFile := filepath.Join(projectRoot, ".mutate4lua", "tmp", mutruntime.FNV1a64Hex(suite)+".coverage")
+			args := []string{"lua", Path(projectRoot, driverScript), "--lane", lane, "--coverage-file", coverageFile, "--suite-module", suite, "--quiet"}
+			if mode != "" {
+				args = append(args, "--mode", mode)
 			}
-			coveredFiles = append(coveredFiles, mutruntime.NormalizeRelativePath(file))
+			result := mutruntime.RunCommand(projectRoot, args, 0, false)
+			if result.ExitCode != 0 {
+				return "", 1, fmt.Errorf("index suite %s failed: %s", suite, result.Output)
+			}
+			coverageLines, readErr := ReadCoverageLines(coverageFile)
+			_ = os.Remove(coverageFile)
+			if readErr != nil {
+				return "", 1, readErr
+			}
+			coveredFiles := []string{}
+			for line := range coverageLines {
+				file := line
+				if idx := mutruntime.LastIndexByte(line, ':'); idx >= 0 {
+					file = line[:idx]
+				}
+				coveredFiles = append(coveredFiles, mutruntime.NormalizeRelativePath(file))
+			}
+			sort.Strings(coveredFiles)
+			index.Suites[suite] = mutruntime.DedupeStrings(coveredFiles)
 		}
-		sort.Strings(coveredFiles)
-		index.Suites[suite] = mutruntime.DedupeStrings(coveredFiles)
 	}
 	path := suiteIndexPath(projectRoot, lane, mode, projectHashValue)
 	if err := mutruntime.WriteJSONFile(path, index); err != nil {
