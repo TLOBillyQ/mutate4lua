@@ -84,3 +84,68 @@ The manifest is stored as a footer block at the end of the target file.
 make test-go
 make test-lua
 ```
+
+---
+
+## 中文文档
+
+`mutate4lua` 是一个用于 Lua 项目的独立变异测试工具。
+它采用 Lua 优先的布局，使用 Go 作为执行引擎：
+
+- `lua/mutate4lua/` - 公共 Lua 包、默认驱动程序和内部纯 Lua 辅助函数
+- `cmd/mutate4lua-engine/` - Go 引擎入口
+- `internal/` - Go 引擎实现包
+- `bin/mutate4lua` - Lua 包装器，解析/构建 Go 引擎并转发 CLI 调用
+
+### 功能特性
+
+对于请求的 Lua 源文件，`mutate4lua`：
+
+- 接受恰好一个 `.lua` 文件目标
+- 从 Lua 感知词法分析器中发现变异点
+- 跟踪声明作用域以进行差异化变异
+- 将清单存储为目标文件内的嵌入式页脚注释
+- 使用默认的进程内 Lua 测试运行器收集行覆盖率
+- 当有覆盖率时跳过未覆盖的变异点
+- 在隔离的工作空间副本中为每个选定的变异体重新运行测试命令
+- 报告被杀死、存活、超时和未覆盖的变异体
+- 在成功的干净运行后更新嵌入式清单
+
+### 当前支持的 Lua 变异集合
+
+- 布尔字面量：`true` <-> `false`
+- 相等/比较：`==`, `~=`, `<`, `<=`, `>`, `>=`
+- 算术运算：`+` <-> `-`, `*` <-> `/`
+- 布尔运算符：`and` <-> `or`
+- 一元运算符：
+  - `not expr` -> `expr`
+  - `-expr` -> `expr`
+- 整数常量：`0` <-> `1`
+- 字符串字面量替换为 `nil`
+- 函数调用表达式替换为 `nil`
+
+### CLI 用法
+
+```bash
+lua bin/mutate4lua --help
+lua bin/mutate4lua src/demo/flag.lua
+lua bin/mutate4lua src/demo/flag.lua --scan
+lua bin/mutate4lua src/demo/flag.lua --lines 12,18
+lua bin/mutate4lua src/demo/flag.lua --update-manifest
+lua bin/mutate4lua src/demo/flag.lua --since-last-run
+lua bin/mutate4lua src/demo/flag.lua --mutate-all
+lua bin/mutate4lua src/demo/flag.lua --test-command "busted"
+```
+
+### 退出代码
+
+- `0`：成功，无存活变异体，扫描成功，或清单更新成功
+- `1`：命令行使用错误
+- `2`：基线测试失败
+- `3`：至少有一个变异体存活
+
+### 环境要求
+
+- Lua
+- Go 1.22+
+- 带有 `find`、`mkdir` 和 `rm` 的 shell 环境
