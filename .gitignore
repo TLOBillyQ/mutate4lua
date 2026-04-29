@@ -6,3 +6,7 @@
 __pycache__/
 bin/mutate4lua-engine
 bin/mutate4lua-engine.exe
+
+# Go build artifacts (cmd/ subdir output)
+cmd/*/*.exe
+cmd/mutate4lua-engine/mutate4lua-engine
