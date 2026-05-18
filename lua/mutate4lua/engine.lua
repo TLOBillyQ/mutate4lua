@@ -453,16 +453,12 @@ function engine.update_manifest(options, env)
     return 1
   end
 
-  local abs_target = util.absolute_path(util.join_path(workspace_root, options.target))
-  local source = util.read_file(abs_target)
-  if not source then
-    stderr:write("error: cannot read ", options.target, "\n")
+  local data, stripped, abs_target, scan_err = _scan_target(workspace_root, options.target)
+  if not data then
+    stderr:write("error: ", scan_err, "\n")
     return 1
   end
 
-  local relative = project.relative_file(workspace_root, abs_target)
-  local stripped = manifest.strip(source)
-  local data = scanner.analyze(abs_target, relative, stripped)
   local project_root = project.find_root(workspace_root, abs_target)
   local proj_hash = project.project_hash(project_root, abs_target, stripped)
 
@@ -472,7 +468,7 @@ function engine.update_manifest(options, env)
     scopes = data.scopes,
   })
 
-  stdout:write("manifest updated: ", relative, "\n")
+  stdout:write("manifest updated: ", data.relative_file, "\n")
   return 0
 end
 
