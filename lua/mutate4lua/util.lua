@@ -360,8 +360,81 @@ local function encode_json(value)
   return "{" .. table.concat(parts, ",") .. "}"
 end
 
+util.encode_json = encode_json
+
 function util.write_json(path, value)
   assert(util.write_file(path, encode_json(value)))
+end
+
+local function _json_decode(text, pos)
+  pos = text:match("^%s*()", pos or 1)
+  local ch = text:sub(pos, pos)
+  if ch == '"' then
+    local cursor = pos + 1
+    local parts = {}
+    while cursor <= #text do
+      local c = text:sub(cursor, cursor)
+      if c == '\\' then
+        local nc = text:sub(cursor + 1, cursor + 1)
+        if nc == 'n' then parts[#parts + 1] = '\n'
+        elseif nc == 't' then parts[#parts + 1] = '\t'
+        elseif nc == 'r' then parts[#parts + 1] = '\r'
+        elseif nc == '"' then parts[#parts + 1] = '"'
+        elseif nc == '\\' then parts[#parts + 1] = '\\'
+        elseif nc == '/' then parts[#parts + 1] = '/'
+        else parts[#parts + 1] = nc end
+        cursor = cursor + 2
+      elseif c == '"' then
+        return table.concat(parts), cursor + 1
+      else
+        parts[#parts + 1] = c
+        cursor = cursor + 1
+      end
+    end
+    return nil, pos
+  elseif ch == '{' then
+    local obj = {}
+    pos = text:match("^%s*()", pos + 1)
+    if text:sub(pos, pos) == '}' then return obj, pos + 1 end
+    while true do
+      local key, val
+      key, pos = _json_decode(text, pos)
+      pos = text:match("^%s*:%s*()", pos)
+      val, pos = _json_decode(text, pos)
+      obj[key] = val
+      pos = text:match("^%s*()", pos)
+      if text:sub(pos, pos) == '}' then return obj, pos + 1 end
+      pos = text:match("^%s*,%s*()", pos)
+    end
+  elseif ch == '[' then
+    local arr = {}
+    pos = text:match("^%s*()", pos + 1)
+    if text:sub(pos, pos) == ']' then return arr, pos + 1 end
+    while true do
+      local val
+      val, pos = _json_decode(text, pos)
+      arr[#arr + 1] = val
+      pos = text:match("^%s*()", pos)
+      if text:sub(pos, pos) == ']' then return arr, pos + 1 end
+      pos = text:match("^%s*,%s*()", pos)
+    end
+  elseif text:sub(pos, pos + 3) == 'true' then
+    return true, pos + 4
+  elseif text:sub(pos, pos + 4) == 'false' then
+    return false, pos + 5
+  elseif text:sub(pos, pos + 3) == 'null' then
+    return nil, pos + 4
+  else
+    local num_str = text:match("^%-?%d+%.?%d*[eE]?[+-]?%d*", pos)
+    if num_str then return tonumber(num_str), pos + #num_str end
+    return nil, pos
+  end
+end
+
+function util.decode_json(text)
+  if type(text) ~= "string" or text == "" then return nil end
+  local value = _json_decode(text, 1)
+  return value
 end
 
 function util.normalize_newlines(value)
@@ -380,20 +453,42 @@ function util.split_lines(value)
   return lines
 end
 
+local _fnv1a_fn = nil
 function util.fnv1a64(text)
-  local native_bitops = pcall(function()
-    return load("return (0 ~ 0) == 0 and (0 & 0) == 0")()
-  end)
-  if not native_bitops then
-    error("fnv1a64 requires Lua with native bitwise operators")
+  if not _fnv1a_fn then
+    local ok_native = pcall(function()
+      return load("return (0 ~ 0) == 0 and (0 & 0) == 0")()
+    end)
+    if ok_native then
+      _fnv1a_fn = assert(load(table.concat({
+        "return function(t)",
+        "  local h = 0xcbf29ce484222325",
+        "  local p = 0x100000001b3",
+        "  for i = 1, #t do",
+        "    h = h ~ t:byte(i)",
+        "    h = (h * p) & 0xFFFFFFFFFFFFFFFF",
+        "  end",
+        "  return string.format('%016x', h)",
+        "end",
+      }, "\n")))()
+    else
+      local ok_bit, bit_lib = pcall(require, "bit")
+      if ok_bit then
+        _fnv1a_fn = function(t)
+          local h = bit_lib.tobit(-2128831035)
+          for i = 1, #t do
+            h = bit_lib.bxor(h, t:byte(i))
+            h = bit_lib.tobit(h * 16777619)
+          end
+          local u = h < 0 and h + 4294967296 or h
+          return string.format("%08x", u)
+        end
+      else
+        error("fnv1a requires Lua 5.3+ or LuaJIT")
+      end
+    end
   end
-  local hash = 0xcbf29ce484222325
-  local prime = 0x100000001b3
-  for index = 1, #text do
-    hash = hash ~ text:byte(index)
-    hash = (hash * prime) & 0xFFFFFFFFFFFFFFFF
-  end
-  return string.format("%016x", hash)
+  return _fnv1a_fn(text)
 end
 
 function util.default_max_workers()
