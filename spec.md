@@ -1,21 +1,19 @@
 # mutate4lua Specification
 
-`mutate4lua` is a mutation-testing tool for Lua source code.
-
-It uses a Lua-first package layout plus a Go execution engine. The Go engine is the
-canonical implementation for CLI `scan`, `mutate`, `update-manifest`, and `index-suites`
-commands; the Lua package provides the public wrapper, default driver, and archived pure-Lua helpers.
+`mutate4lua` is a pure-Lua mutation-testing tool for Lua source code.
 
 It shall:
-- accept exactly one Lua source file as its target
+
+- accept exactly one Lua source file as its target, except suite-index commands
 - discover mutation sites from Lua source tokens
 - optionally use an embedded manifest to restrict work to changed scopes
 - use line coverage when the built-in test driver is active
-- execute tests against each selected mutant
+- execute tests against each selected mutant in an isolated workspace copy
 - report killed, survived, timed-out, and uncovered mutation sites
 - update the embedded manifest after successful clean runs
 
 Supported forms:
+
 - `mutate4lua <file.lua>`
 - `mutate4lua <file.lua> --scan`
 - `mutate4lua <file.lua> --update-manifest`
@@ -27,31 +25,18 @@ Supported forms:
 - `mutate4lua <file.lua> --timeout-factor N`
 - `mutate4lua <file.lua> --test-command CMD`
 - `mutate4lua <file.lua> --verbose`
+- `mutate4lua --index-suites --lane behavior`
 - `mutate4lua --help`
 
-The internal Go engine also supports:
-- `mutate4lua-engine scan --target <file.lua>`
-- `mutate4lua-engine mutate --target <file.lua>`
-- `mutate4lua-engine update-manifest --target <file.lua>`
-- `mutate4lua-engine index-suites --lane behavior`
-
 Defaults:
-- timeout factor: `10`
-- mutation warning threshold: `50`
-- max workers: half the available processors, minimum `1`
 
-Rejected combinations:
-- `--scan` with `--since-last-run`
-- `--scan` with `--mutate-all`
-- `--scan` with `--update-manifest`
-- `--lines` with `--since-last-run`
-- `--lines` with `--mutate-all`
-- `--lines` with `--update-manifest`
-- `--since-last-run` with `--mutate-all`
-- `--update-manifest` with `--since-last-run`
-- `--update-manifest` with `--mutate-all`
+- lane: `behavior`
+- timeout factor: `15`
+- runner: `harness`
+- max workers: accepted for compatibility; execution is sequential
 
 The current mutation set includes:
+
 - `true` <-> `false`
 - `==` <-> `~=`
 - `<` <-> `<=`

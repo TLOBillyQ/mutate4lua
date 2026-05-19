@@ -26,10 +26,10 @@ end
 local function run()
   local args = parse_args(arg)
   package.path = table.concat({
-    args.tool_root .. "/lua/?.lua",
-    args.tool_root .. "/lua/?/init.lua",
-    "lua/?.lua",
-    "lua/?/init.lua",
+    args.tool_root .. "/lib/?.lua",
+    args.tool_root .. "/lib/?/init.lua",
+    "lib/?.lua",
+    "lib/?/init.lua",
     "?.lua",
     package.path,
   }, ";")

@@ -485,7 +485,16 @@ function engine.index_suites(options, env)
   local output = util.trim(result.output or "")
   if output ~= "" then
     if result.ok then
-      stdout:write(output, "\n")
+      if options.json then
+        local suites = util.decode_json(output) or {}
+        stdout:write(util.encode_json({
+          ok = true,
+          suite_count = #suites,
+          suites = suites,
+        }), "\n")
+      else
+        stdout:write(output, "\n")
+      end
     else
       stderr:write(output, "\n")
     end

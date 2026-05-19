@@ -68,7 +68,7 @@ end
 function project.default_test_command(tool_root, _opts)
   return {
     "lua",
-    util.join_path(tool_root, "lua", "mutate4lua", "driver", "default.lua"),
+    util.join_path(tool_root, "lib", "mutate4lua", "driver", "default.lua"),
     "--root",
     ".",
     "--tool-root",

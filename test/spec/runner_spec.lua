@@ -32,29 +32,26 @@ test("default max workers returns a positive integer without python", function()
   assert_equal(workers, math.floor(workers))
 end)
 
-test("engine resolution prefers explicit environment path", function()
-  local root = temp_dir()
-  local custom = util.join_path(root, "bin", "custom-engine")
-  write(custom, "#!/bin/sh\nexit 0\n")
-  assert(util.command_succeeds("chmod +x " .. util.shell_quote(custom)))
-  local resolved = assert(mutate4lua.resolve_engine({binary_path = custom}))
-  assert_equal(util.absolute_path(custom), resolved)
-end)
-
-test("bin wrapper works without python helper file", function()
-  local repo_root = util.absolute_path(".")
+test("public run works without python helper file", function()
+  local repo_root = _G.MUTATE4LUA_TEST_ROOT or util.absolute_path(".")
   local helper_path = util.join_path(repo_root, "tools", "process_helper.py")
-  local fake_root = temp_dir()
-  local fake_engine = util.join_path(fake_root, "engine.sh")
-  write(fake_engine, "#!/bin/sh\nprintf 'WRAPPER %s\\n' \"$*\"\n")
-  assert(util.command_succeeds("chmod +x " .. util.shell_quote(fake_engine)))
+  local sample_path = util.join_path(repo_root, "tmp_public_run_probe.lua")
+  write(sample_path, "return true\n")
   assert_equal(false, util.is_file(helper_path))
 
-  local command = table.concat({
-    "cd", util.shell_quote(repo_root), "&&",
-    "MUTATE4LUA_ENGINE_BIN=" .. util.shell_quote(fake_engine),
-    "lua", util.shell_quote("bin/mutate4lua"), "help",
-  }, " ")
-  local output = assert(util.capture(command))
-  assert_contains(output, "WRAPPER help")
+  local output = {}
+  local exit_code = mutate4lua.run({"tmp_public_run_probe.lua", "--scan"}, {
+    cwd = repo_root,
+    stdout = {
+      write = function(_, ...)
+        local count = select("#", ...)
+        for index = 1, count do
+          output[#output + 1] = tostring(select(index, ...))
+        end
+      end,
+    },
+  })
+  util.remove(sample_path)
+  assert_equal(0, exit_code)
+  assert_contains(table.concat(output), "sites:")
 end)
