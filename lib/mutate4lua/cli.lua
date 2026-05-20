@@ -17,8 +17,7 @@ local function _help_text(command_name)
     "选项 / Options:",
     "  --lane behavior|contract   默认 behavior / default behavior",
     "  --runner harness|busted    默认 harness / default harness",
-    "  --since-last-run           只变异上次后变化的 scopes",
-    "  --mutate-all               忽略 manifest 变异所有位点",
+    "  --mutate-all               忽略 manifest 变异所有位点（默认跳过未修改 scope）",
     "  --lines N,N                限制行号 / restrict to lines",
     "  --max-workers N            (保留，初版忽略)",
     "  --timeout-factor N         超时倍数 / timeout multiplier (default 15)",
@@ -45,7 +44,6 @@ local function _parse_args(args)
     lane = "behavior",
     runner = "harness",
     dry_run = false,
-    since_last_run = false,
     mutate_all = false,
     line_set = nil,
     timeout_factor = 15,
@@ -69,8 +67,6 @@ local function _parse_args(args)
       options.subcommand = "index-suites"
     elseif token == "--dry-run" then
       options.dry_run = true
-    elseif token == "--since-last-run" then
-      options.since_last_run = true
     elseif token == "--mutate-all" then
       options.mutate_all = true
     elseif token == "--json" then

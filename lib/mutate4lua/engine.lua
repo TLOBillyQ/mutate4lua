@@ -426,7 +426,7 @@ function engine.mutate(options, env)
   local changed_scopes = _changed_scope_lookup(scopes, old_manifest)
   local initial_site_counts = _site_counts_by_scope(data.sites)
 
-  if options.since_last_run and not options.mutate_all then
+  if not options.mutate_all then
     if old_manifest then
       sites = _filter_by_changed_scopes(sites, changed_scopes)
     end
