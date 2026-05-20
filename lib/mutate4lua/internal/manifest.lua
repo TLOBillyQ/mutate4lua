@@ -55,6 +55,11 @@ function manifest.read(path)
       start_line = tonumber(scope.startLine),
       end_line = tonumber(scope.endLine),
       semantic_hash = scope.semanticHash,
+      last_mutated_at = scope.lastMutatedAt,
+      last_mutation_lane = scope.lastMutationLane,
+      last_mutation_status = scope.lastMutationStatus,
+      last_mutation_sites = tonumber(scope.lastMutationSites),
+      last_mutation_killed = tonumber(scope.lastMutationKilled),
     }
   end
   return {
@@ -66,7 +71,7 @@ end
 function manifest.serialize(data)
   local lines = {
     manifest.start_marker:sub(1, -2),
-    "version=" .. tostring(data.version or 1),
+    "version=" .. tostring(data.version or 2),
     "projectHash=" .. tostring(data.project_hash or ""),
   }
   for index, scope in ipairs(data.scopes or {}) do
@@ -76,6 +81,21 @@ function manifest.serialize(data)
     lines[#lines + 1] = key .. "startLine=" .. tostring(scope.start_line)
     lines[#lines + 1] = key .. "endLine=" .. tostring(scope.end_line)
     lines[#lines + 1] = key .. "semanticHash=" .. scope.semantic_hash
+    if scope.last_mutated_at ~= nil then
+      lines[#lines + 1] = key .. "lastMutatedAt=" .. tostring(scope.last_mutated_at)
+    end
+    if scope.last_mutation_lane ~= nil then
+      lines[#lines + 1] = key .. "lastMutationLane=" .. tostring(scope.last_mutation_lane)
+    end
+    if scope.last_mutation_status ~= nil then
+      lines[#lines + 1] = key .. "lastMutationStatus=" .. tostring(scope.last_mutation_status)
+    end
+    if scope.last_mutation_sites ~= nil then
+      lines[#lines + 1] = key .. "lastMutationSites=" .. tostring(scope.last_mutation_sites)
+    end
+    if scope.last_mutation_killed ~= nil then
+      lines[#lines + 1] = key .. "lastMutationKilled=" .. tostring(scope.last_mutation_killed)
+    end
   end
   lines[#lines + 1] = manifest.end_marker
   return table.concat(lines, "\n") .. "\n"

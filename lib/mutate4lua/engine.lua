@@ -122,18 +122,36 @@ local function _filter_by_lines(sites, line_set)
   return filtered
 end
 
-local function _filter_by_manifest(sites, scopes, old_manifest)
-  if not old_manifest then return sites end
-  local old_hashes = {}
+local function _scope_manifest_map(old_manifest)
+  local old_scopes = {}
   for _, scope in ipairs(old_manifest.scopes or {}) do
-    old_hashes[scope.id] = scope.semantic_hash
+    old_scopes[scope.id] = scope
   end
+  return old_scopes
+end
+
+local function _changed_scope_lookup(scopes, old_manifest)
+  if not old_manifest then
+    local changed_scopes = {}
+    for _, scope in ipairs(scopes or {}) do
+      changed_scopes[scope.id] = true
+    end
+    return changed_scopes
+  end
+
+  local old_scopes = _scope_manifest_map(old_manifest)
   local changed_scopes = {}
   for _, scope in ipairs(scopes) do
-    if old_hashes[scope.id] ~= scope.semantic_hash then
+    local old_scope = old_scopes[scope.id]
+    if old_scope == nil or old_scope.semantic_hash ~= scope.semantic_hash then
       changed_scopes[scope.id] = true
     end
   end
+  return changed_scopes
+end
+
+local function _filter_by_changed_scopes(sites, changed_scopes)
+  if not changed_scopes then return sites end
   local filtered = {}
   for _, site in ipairs(sites) do
     if changed_scopes[site.scope_id] then
@@ -141,6 +159,129 @@ local function _filter_by_manifest(sites, scopes, old_manifest)
     end
   end
   return filtered
+end
+
+local function _site_counts_by_scope(sites)
+  local counts = {}
+  for _, site in ipairs(sites or {}) do
+    local scope_id = site.scope_id
+    counts[scope_id] = (counts[scope_id] or 0) + 1
+  end
+  return counts
+end
+
+local function _copy_scope(scope)
+  return {
+    id = scope.id,
+    kind = scope.kind,
+    start_line = scope.start_line,
+    end_line = scope.end_line,
+    semantic_hash = scope.semantic_hash,
+  }
+end
+
+local function _copy_last_mutation_fields(target, source)
+  if source == nil then
+    return
+  end
+  target.last_mutated_at = source.last_mutated_at
+  target.last_mutation_lane = source.last_mutation_lane
+  target.last_mutation_status = source.last_mutation_status
+  target.last_mutation_sites = source.last_mutation_sites
+  target.last_mutation_killed = source.last_mutation_killed
+end
+
+local function _build_manifest_scopes(scopes, old_manifest, updates)
+  local old_scopes = old_manifest and _scope_manifest_map(old_manifest) or {}
+  local next_scopes = {}
+  for _, scope in ipairs(scopes or {}) do
+    local next_scope = _copy_scope(scope)
+    local old_scope = old_scopes[scope.id]
+    if old_scope ~= nil and old_scope.semantic_hash == scope.semantic_hash then
+      _copy_last_mutation_fields(next_scope, old_scope)
+    end
+    local update = updates and updates[scope.id] or nil
+    if update ~= nil then
+      _copy_last_mutation_fields(next_scope, update)
+    end
+    next_scopes[#next_scopes + 1] = next_scope
+  end
+  return next_scopes
+end
+
+local function _utc_timestamp()
+  return os.date("!%Y-%m-%dT%H:%M:%SZ")
+end
+
+local function _no_site_updates(scopes, changed_scopes, initial_site_counts, timestamp, lane)
+  local updates = {}
+  for _, scope in ipairs(scopes or {}) do
+    if changed_scopes[scope.id] == true and (initial_site_counts[scope.id] or 0) == 0 then
+      updates[scope.id] = {
+        last_mutated_at = timestamp,
+        last_mutation_lane = lane,
+        last_mutation_status = "no_sites",
+        last_mutation_sites = 0,
+        last_mutation_killed = 0,
+      }
+    end
+  end
+  return updates
+end
+
+local function _passed_scope_updates(results, timestamp, lane)
+  local updates = {}
+  for _, result in ipairs(results or {}) do
+    local scope_id = result.scope_id
+    local update = updates[scope_id]
+    if update == nil then
+      update = {
+        last_mutated_at = timestamp,
+        last_mutation_lane = lane,
+        last_mutation_status = "passed",
+        last_mutation_sites = 0,
+        last_mutation_killed = 0,
+      }
+      updates[scope_id] = update
+    end
+    update.last_mutation_sites = update.last_mutation_sites + 1
+    if result.status == "killed" then
+      update.last_mutation_killed = update.last_mutation_killed + 1
+    end
+  end
+  return updates
+end
+
+local function _merge_updates(base, extra)
+  for key, value in pairs(extra or {}) do
+    base[key] = value
+  end
+  return base
+end
+
+local function _updates_cover_changed_scopes(scopes, changed_scopes, updates)
+  for _, scope in ipairs(scopes or {}) do
+    if changed_scopes[scope.id] == true and (updates == nil or updates[scope.id] == nil) then
+      return false
+    end
+  end
+  return true
+end
+
+local function _write_manifest_update(abs_target, stripped, project_root, scopes, old_manifest, changed_scopes, updates)
+  if updates == nil or next(updates) == nil then
+    return false
+  end
+  if not _updates_cover_changed_scopes(scopes, changed_scopes, updates) then
+    return false
+  end
+  local proj_hash = project.project_hash(project_root, abs_target, stripped)
+  manifest.write(abs_target, stripped, {
+    version = 2,
+    project_hash = proj_hash,
+    scopes = _build_manifest_scopes(scopes, old_manifest, updates),
+  })
+  return true
 end
 
 local function _build_driver_command(driver_path, lane, suite_list_file, coverage_file)
@@ -281,11 +422,13 @@ function engine.mutate(options, env)
   local relative = data.relative_file
   local sites = data.sites
   local scopes = data.scopes
+  local old_manifest = manifest.read(abs_target)
+  local changed_scopes = _changed_scope_lookup(scopes, old_manifest)
+  local initial_site_counts = _site_counts_by_scope(data.sites)
 
   if options.since_last_run and not options.mutate_all then
-    local old = manifest.read(abs_target)
-    if old then
-      sites = _filter_by_manifest(sites, scopes, old)
+    if old_manifest then
+      sites = _filter_by_changed_scopes(sites, changed_scopes)
     end
   end
 
@@ -294,7 +437,36 @@ function engine.mutate(options, env)
   end
 
   if #sites == 0 then
-    stdout:write("no mutation sites to test\n")
+    local manifest_updated = false
+    if not options.line_set then
+      manifest_updated = _write_manifest_update(
+        abs_target,
+        stripped,
+        project.find_root(workspace_root, abs_target),
+        scopes,
+        old_manifest,
+        changed_scopes,
+        _no_site_updates(scopes, changed_scopes, initial_site_counts, _utc_timestamp(), options.lane)
+      )
+    end
+    if options.json then
+      stdout:write(util.encode_json({
+        file = relative,
+        total_sites = 0,
+        killed = 0,
+        survived = 0,
+        timeout = 0,
+        score = 100,
+        baseline_seconds = 0,
+        manifest_updated = manifest_updated,
+        mutations = {},
+      }), "\n")
+    else
+      stdout:write("no mutation sites to test\n")
+      if manifest_updated then
+        stdout:write("manifest updated: ", relative, "\n")
+      end
+    end
     return 0
   end
 
@@ -342,6 +514,34 @@ function engine.mutate(options, env)
   if #sites == 0 then
     if not options.json then
       stdout:write("no covered mutation sites\n")
+    end
+    local manifest_updated = false
+    if not options.line_set then
+      manifest_updated = _write_manifest_update(
+        abs_target,
+        stripped,
+        project.find_root(workspace_root, abs_target),
+        scopes,
+        old_manifest,
+        changed_scopes,
+        _no_site_updates(scopes, changed_scopes, initial_site_counts, _utc_timestamp(), options.lane)
+      )
+    end
+    if manifest_updated and not options.json then
+      stdout:write("manifest updated: ", relative, "\n")
+    end
+    if options.json then
+      stdout:write(util.encode_json({
+        file = relative,
+        total_sites = 0,
+        killed = 0,
+        survived = 0,
+        timeout = 0,
+        score = 100,
+        baseline_seconds = baseline.elapsed,
+        manifest_updated = manifest_updated,
+        mutations = {},
+      }), "\n")
     end
     _cleanup(workspace, suite_list_file)
     return 0
@@ -409,6 +609,21 @@ function engine.mutate(options, env)
 
   local total = #results
   local score = total > 0 and (killed / total * 100) or 100
+  local manifest_updated = false
+  if survived == 0 and timed_out == 0 and not options.line_set then
+    local timestamp = _utc_timestamp()
+    local updates = _passed_scope_updates(results, timestamp, options.lane)
+    _merge_updates(updates, _no_site_updates(scopes, changed_scopes, initial_site_counts, timestamp, options.lane))
+    manifest_updated = _write_manifest_update(
+      abs_target,
+      stripped,
+      project.find_root(workspace_root, abs_target),
+      scopes,
+      old_manifest,
+      changed_scopes,
+      updates
+    )
+  end
 
   if options.json then
     local mutations_out = {}
@@ -431,12 +646,16 @@ function engine.mutate(options, env)
       timeout = timed_out,
       score = score,
       baseline_seconds = baseline.elapsed,
+      manifest_updated = manifest_updated,
       mutations = mutations_out,
     }), "\n")
   else
     stdout:write(string.format("score: %.1f%% (%d/%d killed", score, killed, total))
     if timed_out > 0 then stdout:write(", ", tostring(timed_out), " timeout") end
     stdout:write(")\n")
+    if manifest_updated then
+      stdout:write("manifest updated: ", relative, "\n")
+    end
   end
 
   if survived > 0 then return 3 end
@@ -463,7 +682,7 @@ function engine.update_manifest(options, env)
   local proj_hash = project.project_hash(project_root, abs_target, stripped)
 
   manifest.write(abs_target, stripped, {
-    version = 1,
+    version = 2,
     project_hash = proj_hash,
     scopes = data.scopes,
   })

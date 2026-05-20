@@ -1,6 +1,0 @@
-.mutate4lua/
-*.coverage
-*.coverage.*
-.luacov
-.luacov.*
-__pycache__/
