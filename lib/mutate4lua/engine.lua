@@ -91,11 +91,16 @@ local function _parse_coverage_lines(coverage_path, target_relative)
   local content = util.read_file(coverage_path)
   if not content then return {} end
   local covered = {}
-  local prefix = target_relative .. ":"
+  local normalized_target = util.normalize_relative_path(target_relative)
   for line in content:gmatch("[^\n]+") do
-    if util.starts_with(line, prefix) then
-      local line_num = tonumber(line:sub(#prefix + 1))
-      if line_num then covered[line_num] = true end
+    local last_colon = line:find(":[^:]*$")
+    if last_colon then
+      local file = line:sub(1, last_colon - 1)
+      local line_text = line:sub(last_colon + 1)
+      if util.normalize_relative_path(file) == normalized_target then
+        local line_num = tonumber(line_text)
+        if line_num then covered[line_num] = true end
+      end
     end
   end
   return covered
@@ -300,30 +305,97 @@ local function _build_driver_command(driver_path, lane, suite_list_file, coverag
   return _shell_join(parts)
 end
 
-local function _discover_relevant_suites(run_shell, workspace_root, driver_script, lane, target_relative)
+local function _suite_map_cache_path(workspace_root, lane, hash)
+  return util.join_path(workspace_root, ".mutate4lua", "cache",
+    "suite_file_map." .. lane .. "." .. hash .. ".json")
+end
+
+local function _spec_and_driver_fingerprint(workspace_root, driver_script)
+  local parts = {}
+  local driver_path = util.join_path(workspace_root, driver_script)
+  local driver_content = util.read_file(driver_path)
+  if driver_content then
+    parts[#parts + 1] = "driver:"
+    parts[#parts + 1] = driver_script
+    parts[#parts + 1] = "\n"
+    parts[#parts + 1] = util.normalize_newlines(driver_content)
+    parts[#parts + 1] = "\n\0\n"
+  end
+  local spec_dir = util.join_path(workspace_root, "spec")
+  if util.is_directory(spec_dir) then
+    local files = util.list_files(spec_dir, {"*.lua"})
+    for _, abs_path in ipairs(files) do
+      local content = util.read_file(abs_path)
+      if content then
+        parts[#parts + 1] = project.relative_file(workspace_root, abs_path)
+        parts[#parts + 1] = "\n"
+        parts[#parts + 1] = util.normalize_newlines(content)
+        parts[#parts + 1] = "\n\0\n"
+      end
+    end
+  end
+  return util.fnv1a64(table.concat(parts))
+end
+
+local function _load_cached_suite_map(cache_path)
+  local content = util.read_file(cache_path)
+  if not content then return nil end
+  local map = util.decode_json(util.trim(content))
+  if type(map) ~= "table" or type(map.suite_files) ~= "table" then return nil end
+  return map
+end
+
+local function _store_cached_suite_map(cache_path, raw_json)
+  util.mkdir_p(util.parent_dir(cache_path))
+  util.write_file(cache_path, raw_json)
+end
+
+local function _fetch_suite_file_map(run_shell, workspace_root, driver_script, lane)
+  local hash = _spec_and_driver_fingerprint(workspace_root, driver_script)
+  local cache_path = _suite_map_cache_path(workspace_root, lane, hash)
+
+  local cached = _load_cached_suite_map(cache_path)
+  if cached then return cached, nil end
+
   local driver_path = util.join_path(workspace_root, driver_script)
   local cmd = _shell_join({"lua", driver_path, "--lane", lane, "--emit-suite-file-map-json"})
   local result = run_shell(cmd, workspace_root, nil)
-  if not result.ok then return nil end
+  if not result.ok then
+    return nil, "suite-file map discovery failed (exit " .. tostring(result.code) .. "): " .. tostring(result.output or "")
+  end
 
-  local map = util.decode_json(util.trim(result.output or ""))
-  if not map or type(map.suite_files) ~= "table" then return nil end
+  local raw = util.trim(result.output or "")
+  local map = util.decode_json(raw)
+  if type(map) ~= "table" or type(map.suite_files) ~= "table" then
+    return nil, "suite-file map malformed (missing suite_files table)"
+  end
 
+  _store_cached_suite_map(cache_path, raw)
+  return map, nil
+end
+
+local function _discover_relevant_suites(run_shell, workspace_root, driver_script, lane, target_relative)
+  local map, err = _fetch_suite_file_map(run_shell, workspace_root, driver_script, lane)
+  if not map then return nil, err end
+
+  local normalized_target = util.normalize_relative_path(target_relative)
   local relevant = {}
   for suite_name, files in pairs(map.suite_files) do
     for _, file in ipairs(files) do
-      if file == target_relative then
+      if util.normalize_relative_path(file) == normalized_target then
         relevant[#relevant + 1] = suite_name
         break
       end
     end
   end
-  if #relevant == 0 then return nil end
+  if #relevant == 0 then
+    return nil, "no specs in lane '" .. lane .. "' cover " .. target_relative
+  end
 
   table.sort(relevant)
   local suite_file = util.tmp_path("_suites.txt")
   util.write_file(suite_file, table.concat(relevant, "\n") .. "\n")
-  return suite_file
+  return suite_file, nil
 end
 
 local function _scan_target(workspace_root, target)
@@ -472,8 +544,13 @@ function engine.mutate(options, env)
 
   local suite_list_file = nil
   if not options.test_command then
-    suite_list_file = _discover_relevant_suites(
+    local discover_err
+    suite_list_file, discover_err = _discover_relevant_suites(
       run_shell, workspace_root, options.driver_script, options.lane, relative)
+    if not suite_list_file then
+      stderr:write("error: ", discover_err or "suite discovery failed", "\n")
+      return 1
+    end
   end
 
   local workspace = _create_workspace(workspace_root)
@@ -483,7 +560,9 @@ function engine.mutate(options, env)
   if options.test_command then
     baseline_cmd = options.test_command
   else
-    coverage_file = util.tmp_path("_cov.txt")
+    if not options.mutate_all then
+      coverage_file = util.tmp_path("_cov.txt")
+    end
     local driver_in_ws = util.join_path(workspace, options.driver_script)
     baseline_cmd = _build_driver_command(driver_in_ws, options.lane, suite_list_file, coverage_file)
   end
