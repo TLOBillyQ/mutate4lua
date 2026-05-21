@@ -28,7 +28,6 @@ lua tools/quality/mutate.lua src/demo/flag.lua
 lua tools/quality/mutate.lua src/demo/flag.lua --scan
 lua tools/quality/mutate.lua src/demo/flag.lua --lines 12,18
 lua tools/quality/mutate.lua src/demo/flag.lua --update-manifest
-lua tools/quality/mutate.lua src/demo/flag.lua --since-last-run
 lua tools/quality/mutate.lua src/demo/flag.lua --mutate-all
 lua tools/quality/mutate.lua src/demo/flag.lua --test-command "busted"
 ```
@@ -52,12 +51,6 @@ coverage for coverage-based filtering.
 
 - Lua
 - a shell environment with `find`, `mkdir`, `cp`, and `rm`
-
-## Tests
-
-```sh
-make test
-```
 
 ---
 
