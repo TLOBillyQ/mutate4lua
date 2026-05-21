@@ -1,0 +1,7 @@
+return {
+  default = {
+    helper = "spec/helper.lua",
+    pattern = "_spec",
+    verbose = true,
+  },
+}
