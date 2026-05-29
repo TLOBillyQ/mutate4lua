@@ -710,6 +710,7 @@ function engine.mutate(options, env)
       workspaces = workspaces,
       timeout = timeout,
       timeout_command = _find_timeout_command(),
+      poll_interval = options.poll_interval,
       prepare = function(i, ws)
         util.write_file(util.join_path(ws, relative), scanner.apply_mutation(stripped, sites[i]))
       end,

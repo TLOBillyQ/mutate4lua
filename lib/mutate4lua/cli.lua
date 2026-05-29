@@ -1,4 +1,4 @@
-local engine = require("mutate4lua.engine")
+local default_engine = require("mutate4lua.engine")
 
 local cli = {}
 
@@ -20,6 +20,7 @@ local function _help_text(command_name)
     "  --mutate-all               忽略 manifest 变异所有位点（默认跳过未修改 scope）",
     "  --lines N,N                限制行号 / restrict to lines",
     "  --max-workers N            并行 worker 数（默认 CPU 核数的一半，1=串行）",
+    "  --poll-interval N          并行轮询间隔秒数（默认 0=忙等不 fork；>0 在无空余核时让出 CPU）",
     "  --timeout-factor N         超时倍数 / timeout multiplier (default 15)",
     "  --test-command CMD         自定义测试命令 / custom test command",
     "  --mutation-warning N       变异数量警告阈值",
@@ -85,6 +86,9 @@ local function _parse_args(args)
     elseif token == "--max-workers" then
       index = index + 1
       options.max_workers = tonumber(args[index] or "")
+    elseif token == "--poll-interval" then
+      index = index + 1
+      options.poll_interval = tonumber(args[index] or "")
     elseif token == "--timeout-factor" then
       index = index + 1
       options.timeout_factor = tonumber(args[index] or "15") or 15
@@ -114,6 +118,7 @@ end
 
 function cli.run(args, env)
   env = env or {}
+  local engine = env.engine or default_engine
   local stdout = env.stdout or io.stdout
   local stderr = env.stderr or io.stderr
   local command_name = env.command_name or "tools/quality/mutate.lua"

@@ -11,7 +11,12 @@ local util = require("mutate4lua.util")
 
 local parallel = {}
 
-local DEFAULT_POLL_INTERVAL = 0.2
+-- 0 means busy-wait: keep re-scanning the sentinels with no sleep at all. With
+-- lazy-loaded suites each mutant runs in well under a second, so a coarse sleep
+-- between polls leaves workers idle far longer than the work itself. Busy-wait
+-- forks no shell and gives the tightest refill; a positive --poll-interval is
+-- the escape hatch for machines without a spare core (see _sleep).
+local DEFAULT_POLL_INTERVAL = 0
 local TIMEOUT_EXIT_CODE = 124
 
 local function _build_launcher_script(workspace, command, timeout_seconds, timeout_command, output_path, status_path)
@@ -36,6 +41,12 @@ local function _build_launcher_script(workspace, command, timeout_seconds, timeo
 end
 
 local function _sleep(seconds)
+  -- A non-positive interval means busy-wait: do not fork a shell at all. Only a
+  -- positive interval throttles the poll loop by sleeping (one `sh` per idle
+  -- scan), trading a little wall-clock for an idle CPU on constrained machines.
+  if not (seconds and seconds > 0) then
+    return
+  end
   os.execute("sleep " .. tostring(seconds) .. " >/dev/null 2>&1")
 end
 
@@ -56,7 +67,7 @@ end
 --   timeout         seconds before a job is force-killed (optional)
 --   timeout_command "timeout" / "gtimeout" / false (optional)
 --   on_complete(i, result)  optional callback fired in completion order
---   poll_interval   seconds between polls when no job finished (default 0.2)
+--   poll_interval   seconds to sleep when no job finished (default 0 = busy-wait)
 --   launch(script)  optional override for launching a detached job (tests)
 --   sleep(seconds)  optional override for the poll sleep (tests)
 --

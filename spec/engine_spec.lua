@@ -242,6 +242,22 @@ describe("engine.mutate parallel path", function()
     assert.is_true(captured.worker_count >= 2, "expected more than one worker")
   end)
 
+  it("forwards poll_interval into the parallel runner", function()
+    write_file(target_abs, multi_site_body)
+    local captured
+    local env = parallel_env(function() return killed() end)
+    local base_run_parallel = env.run_parallel
+    env.run_parallel = function(spec)
+      captured = spec
+      return base_run_parallel(spec)
+    end
+    engine.mutate({
+      target = target_rel, test_command = "true", json = true,
+      mutate_all = true, max_workers = 4, poll_interval = 0.05,
+    }, env)
+    assert.are.equal(0.05, captured.poll_interval)
+  end)
+
   it("writes a v2 manifest when every parallel mutant is killed", function()
     write_file(target_abs, multi_site_body)
     engine.mutate({
