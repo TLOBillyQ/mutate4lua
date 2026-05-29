@@ -329,7 +329,7 @@ local function _write_manifest_update(abs_target, stripped, project_root, scopes
   return true
 end
 
-local function _build_driver_command(driver_path, lane, suite_list_file, coverage_file)
+local function _build_driver_command(driver_path, lane, suite_list_file, coverage_file, fail_fast)
   local parts = {"lua", driver_path, "--lane", lane}
   if suite_list_file then
     parts[#parts + 1] = "--suite-list-file"
@@ -340,6 +340,11 @@ local function _build_driver_command(driver_path, lane, suite_list_file, coverag
     parts[#parts + 1] = coverage_file
   else
     parts[#parts + 1] = "--no-coverage"
+  end
+  -- Killed mutants only need one failing case; baseline (coverage-collecting)
+  -- must run every case, so fail-fast is requested for mutant runs only.
+  if fail_fast then
+    parts[#parts + 1] = "--fail-fast"
   end
   parts[#parts + 1] = "--quiet"
   return _shell_join(parts)
@@ -678,7 +683,7 @@ function engine.mutate(options, env)
     if options.test_command then
       return options.test_command
     end
-    return _build_driver_command(util.join_path(ws, options.driver_script), options.lane, suite_list_file, nil)
+    return _build_driver_command(util.join_path(ws, options.driver_script), options.lane, suite_list_file, nil, true)
   end
 
   if not options.json then
