@@ -19,7 +19,7 @@ local function _help_text(command_name)
     "  --runner harness|busted    默认 harness / default harness",
     "  --mutate-all               忽略 manifest 变异所有位点（默认跳过未修改 scope）",
     "  --lines N,N                限制行号 / restrict to lines",
-    "  --max-workers N            (保留，初版忽略)",
+    "  --max-workers N            并行 worker 数（默认 CPU 核数的一半，1=串行）",
     "  --timeout-factor N         超时倍数 / timeout multiplier (default 15)",
     "  --test-command CMD         自定义测试命令 / custom test command",
     "  --mutation-warning N       变异数量警告阈值",
@@ -84,6 +84,7 @@ local function _parse_args(args)
       options.line_set = _parse_line_set(args[index] or error("--lines requires a value"))
     elseif token == "--max-workers" then
       index = index + 1
+      options.max_workers = tonumber(args[index] or "")
     elseif token == "--timeout-factor" then
       index = index + 1
       options.timeout_factor = tonumber(args[index] or "15") or 15

@@ -492,14 +492,18 @@ function util.fnv1a64(text)
 end
 
 function util.default_max_workers()
-  local candidates = {
-    os.getenv("NUMBER_OF_PROCESSORS"),
-    util.capture("getconf _NPROCESSORS_ONLN 2>/dev/null"),
-    util.capture("nproc 2>/dev/null"),
-    util.capture("sysctl -n hw.ncpu 2>/dev/null"),
+  -- Probes are functions, not a literal array: on Unix `NUMBER_OF_PROCESSORS`
+  -- is unset, and a `{ nil, ... }` array literal would make `ipairs` stop at
+  -- the first hole before the working getconf/sysctl probes ever run. Lazy
+  -- evaluation also avoids spawning later probes once one succeeds.
+  local probes = {
+    function() return os.getenv("NUMBER_OF_PROCESSORS") end,
+    function() return util.capture("getconf _NPROCESSORS_ONLN 2>/dev/null") end,
+    function() return util.capture("nproc 2>/dev/null") end,
+    function() return util.capture("sysctl -n hw.ncpu 2>/dev/null") end,
   }
-  for _, candidate in ipairs(candidates) do
-    local value = tonumber(util.trim(candidate or ""))
+  for _, probe in ipairs(probes) do
+    local value = tonumber(util.trim(probe() or ""))
     if value and value >= 1 then
       return math.max(1, math.floor(value / 2))
     end

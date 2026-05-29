@@ -186,3 +186,85 @@ describe("engine.mutate differential filter", function()
     assert.is_true(shell.count() >= 2, "mutate-all should drive baseline + at least one mutant")
   end)
 end)
+
+describe("engine.mutate parallel path", function()
+  local dir
+  local target_rel = "m.lua"
+  local target_abs
+  -- A body with several mutation sites (==, ~=, integer literals) so
+  -- worker_count = min(max_workers, #sites) > 1 and the parallel branch runs.
+  local multi_site_body = "return (1 == 2) and (3 ~= 4)\n"
+
+  before_each(function()
+    dir = tmp_dir()
+    target_abs = util.join_path(dir, target_rel)
+  end)
+  after_each(function() rm_rf(dir) end)
+
+  local function parallel_env(make_results)
+    return {
+      cwd = dir,
+      stdout = null_buffer(),
+      stderr = null_buffer(),
+      run_shell = make_shell({{ok = true}}).fn, -- baseline passes; mutants go via run_parallel
+      create_workspaces = function(_, count)
+        local list = {}
+        for i = 1, count do list[i] = util.join_path(dir, "ws_" .. i) end
+        return list
+      end,
+      run_parallel = function(spec)
+        local results = {}
+        for i = 1, spec.job_count do
+          results[i] = make_results(i)
+        end
+        return results
+      end,
+    }
+  end
+
+  local function killed() return {ok = false, code = 1, output = "", elapsed = 0, timed_out = false} end
+
+  it("routes mutants through run_parallel when max_workers > 1", function()
+    write_file(target_abs, multi_site_body)
+    local captured
+    local env = parallel_env(function() return killed() end)
+    local base_run_parallel = env.run_parallel
+    env.run_parallel = function(spec)
+      captured = spec
+      return base_run_parallel(spec)
+    end
+    engine.mutate({
+      target = target_rel, test_command = "true", json = true,
+      mutate_all = true, max_workers = 4,
+    }, env)
+    assert.is_not_nil(captured, "parallel runner was not used")
+    assert.is_true(captured.job_count >= 2, "expected multiple mutation sites")
+    assert.is_true(captured.worker_count >= 2, "expected more than one worker")
+  end)
+
+  it("writes a v2 manifest when every parallel mutant is killed", function()
+    write_file(target_abs, multi_site_body)
+    engine.mutate({
+      target = target_rel, test_command = "true", json = true,
+      mutate_all = true, max_workers = 4,
+    }, parallel_env(function() return killed() end))
+    local data = manifest.read(target_abs)
+    assert.is_not_nil(data)
+    assert.are.equal(2, data.version)
+  end)
+
+  it("leaves the file byte-identical when a parallel mutant survives", function()
+    write_file(target_abs, multi_site_body)
+    local before = read_file(target_abs)
+    engine.mutate({
+      target = target_rel, test_command = "true", json = true,
+      mutate_all = true, max_workers = 4,
+    }, parallel_env(function(i)
+      if i == 1 then
+        return {ok = true, code = 0, output = "", elapsed = 0, timed_out = false}
+      end
+      return killed()
+    end))
+    assert.are.equal(before, read_file(target_abs))
+  end)
+end)

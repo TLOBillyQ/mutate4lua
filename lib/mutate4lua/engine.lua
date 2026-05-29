@@ -1,6 +1,7 @@
 local scanner = require("mutate4lua.internal.scanner")
 local manifest = require("mutate4lua.internal.manifest")
 local project = require("mutate4lua.driver.project")
+local parallel = require("mutate4lua.internal.parallel")
 local util = require("mutate4lua.util")
 
 local engine = {}
@@ -77,6 +78,45 @@ local function _create_workspace(source_dir)
   util.mkdir_p(workspace)
   os.execute("cp -r " .. util.shell_quote(source_dir .. "/.") .. " " .. util.shell_quote(workspace .. "/"))
   return workspace
+end
+
+local function _create_workspaces(source_dir, count)
+  local workspaces = {}
+  for _ = 1, count do
+    workspaces[#workspaces + 1] = _create_workspace(source_dir)
+  end
+  return workspaces
+end
+
+local function _classify_status(run_result)
+  if run_result.timed_out then
+    return "timeout"
+  end
+  if not run_result.ok then
+    return "killed"
+  end
+  return "survived"
+end
+
+local function _result_entry(site, run_result)
+  return {
+    line = site.line,
+    description = site.description,
+    original = site.original_text,
+    replacement = site.replacement_text,
+    status = _classify_status(run_result),
+    elapsed = run_result.elapsed,
+    scope_id = site.scope_id,
+  }
+end
+
+local function _resolve_worker_count(options, site_count)
+  local requested = tonumber(options.max_workers)
+  if requested == nil then
+    requested = util.default_max_workers()
+  end
+  requested = math.max(1, math.floor(requested))
+  return math.min(requested, site_count)
 end
 
 local function _cleanup(...)
@@ -478,6 +518,8 @@ function engine.mutate(options, env)
   local stderr = env.stderr or io.stderr
   local workspace_root = env.cwd or "."
   local run_shell = env.run_shell or _default_run_shell
+  local create_workspaces = env.create_workspaces or _create_workspaces
+  local run_parallel = env.run_parallel or parallel.run
   local timeout_factor = options.timeout_factor or 15
 
   if not options.target then
@@ -631,49 +673,78 @@ function engine.mutate(options, env)
   end
 
   local timeout = math.max(5, (baseline.elapsed + 1) * timeout_factor)
-  local target_in_ws = util.join_path(workspace, relative)
 
-  local mutant_cmd
-  if options.test_command then
-    mutant_cmd = options.test_command
-  else
-    local driver_in_ws = util.join_path(workspace, options.driver_script)
-    mutant_cmd = _build_driver_command(driver_in_ws, options.lane, suite_list_file, nil)
+  local function _mutant_command(ws)
+    if options.test_command then
+      return options.test_command
+    end
+    return _build_driver_command(util.join_path(ws, options.driver_script), options.lane, suite_list_file, nil)
   end
 
   if not options.json then
     stdout:write("baseline: ", tostring(baseline.elapsed), "s (timeout: ", tostring(math.ceil(timeout)), "s)\n")
   end
 
+  local worker_count = _resolve_worker_count(options, #sites)
   local results = {}
-  for i, site in ipairs(sites) do
-    local mutated = scanner.apply_mutation(stripped, site)
-    util.write_file(target_in_ws, mutated)
 
-    local result = run_shell(mutant_cmd, workspace, timeout)
-
-    local status = "survived"
-    if result.timed_out then
-      status = "timeout"
-    elseif not result.ok then
-      status = "killed"
+  if worker_count > 1 then
+    if not options.json then
+      stdout:write("workers: ", tostring(worker_count), " (parallel)\n")
+    end
+    local extra_workspaces = create_workspaces(workspace_root, worker_count - 1)
+    local workspaces = { workspace }
+    for _, ws in ipairs(extra_workspaces) do
+      workspaces[#workspaces + 1] = ws
     end
 
-    results[#results + 1] = {
-      line = site.line,
-      description = site.description,
-      original = site.original_text,
-      replacement = site.replacement_text,
-      status = status,
-      elapsed = result.elapsed,
-      scope_id = site.scope_id,
-    }
+    local completed = 0
+    local run_results = run_parallel({
+      worker_count = worker_count,
+      job_count = #sites,
+      workspaces = workspaces,
+      timeout = timeout,
+      timeout_command = _find_timeout_command(),
+      prepare = function(i, ws)
+        util.write_file(util.join_path(ws, relative), scanner.apply_mutation(stripped, sites[i]))
+      end,
+      command = function(_, ws)
+        return _mutant_command(ws)
+      end,
+      on_complete = function(i, run_result)
+        if not options.json then
+          completed = completed + 1
+          local site = sites[i]
+          stdout:write(string.format("[%d/%d] L%d: %s ... %s (%ds)\n",
+            completed, #sites, site.line, site.description,
+            _classify_status(run_result), run_result.elapsed))
+        end
+      end,
+    })
 
-    util.write_file(target_in_ws, stripped)
+    for i, site in ipairs(sites) do
+      local run_result = run_results[i]
+      if run_result == nil then
+        error("mutate4lua: missing result for mutation site " .. tostring(i))
+      end
+      results[i] = _result_entry(site, run_result)
+    end
 
-    if not options.json then
-      stdout:write(string.format("[%d/%d] L%d: %s ... %s (%ds)\n",
-        i, #sites, site.line, site.description, status, result.elapsed))
+    for _, ws in ipairs(extra_workspaces) do
+      util.remove(ws)
+    end
+  else
+    local target_in_ws = util.join_path(workspace, relative)
+    local mutant_cmd = _mutant_command(workspace)
+    for i, site in ipairs(sites) do
+      util.write_file(target_in_ws, scanner.apply_mutation(stripped, site))
+      local result = run_shell(mutant_cmd, workspace, timeout)
+      results[i] = _result_entry(site, result)
+      util.write_file(target_in_ws, stripped)
+      if not options.json then
+        stdout:write(string.format("[%d/%d] L%d: %s ... %s (%ds)\n",
+          i, #sites, site.line, site.description, results[i].status, result.elapsed))
+      end
     end
   end
 
