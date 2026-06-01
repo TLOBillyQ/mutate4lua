@@ -124,12 +124,48 @@ describe("engine.mutate write gating", function()
     assert.are.equal(2, data.version)
   end)
 
-  it("leaves the file byte-identical when at least one mutant survives", function()
+  it("leaves the file byte-identical when the kill score is below the threshold", function()
+    -- single site, survives -> 0% kill score, well under the threshold
     write_file(target_abs, "return true\n")
     local before = read_file(target_abs)
     local shell = make_shell({{ok = true}, {ok = true}})
     local env = {cwd = dir, run_shell = shell.fn, stdout = null_buffer(), stderr = null_buffer()}
     engine.mutate({target = target_rel, test_command = "true", json = true}, env)
+    assert.are.equal(before, read_file(target_abs))
+  end)
+
+  -- 10 mutation sites: `1`->0, five `<`->`<=`, four `and`->`or`.
+  local ten_site_body = "return 1 < 2 and 3 < 4 and 5 < 6 and 7 < 8 and 9 < 10\n"
+
+  it("records a manifest at the 90% kill threshold despite a residual survivor", function()
+    -- baseline + 9 killed; the 10th mutant defaults to a passing test (survives)
+    -- -> 9/10 = 90%. A file with irreducible-equivalent mutants must still pin
+    -- an empirical baseline instead of staying bootstrap-only.
+    write_file(target_abs, ten_site_body)
+    local returns = {{ok = true}}
+    for _ = 1, 9 do returns[#returns + 1] = {ok = false} end
+    local shell = make_shell(returns)
+    local env = {cwd = dir, run_shell = shell.fn, stdout = null_buffer(), stderr = null_buffer()}
+    engine.mutate({target = target_rel, test_command = "true", json = true, max_workers = 1}, env)
+    local data = manifest.read(target_abs)
+    assert.is_not_nil(data)
+    assert.are.equal(2, data.version)
+    local scope = data.scopes[1]
+    assert.are.equal(10, scope.last_mutation_sites)
+    assert.are.equal(9, scope.last_mutation_killed)
+    -- the residual survivor is recorded honestly, not masked as "passed"
+    assert.are.equal("survived", scope.last_mutation_status)
+  end)
+
+  it("leaves the file byte-identical when the kill score is just under the threshold", function()
+    -- baseline + 8 killed; two mutants survive -> 8/10 = 80% < 90%, no record.
+    write_file(target_abs, ten_site_body)
+    local before = read_file(target_abs)
+    local returns = {{ok = true}}
+    for _ = 1, 8 do returns[#returns + 1] = {ok = false} end
+    local shell = make_shell(returns)
+    local env = {cwd = dir, run_shell = shell.fn, stdout = null_buffer(), stderr = null_buffer()}
+    engine.mutate({target = target_rel, test_command = "true", json = true, max_workers = 1}, env)
     assert.are.equal(before, read_file(target_abs))
   end)
 

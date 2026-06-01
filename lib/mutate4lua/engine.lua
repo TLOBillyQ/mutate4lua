@@ -8,6 +8,14 @@ local engine = {}
 
 local TIMEOUT_EXIT_CODE = 124
 
+-- A scope-level manifest is recorded once the kill score reaches this
+-- threshold (percent), instead of requiring every mutant to die. Files that
+-- contain irreducible-equivalent mutants can never reach 100%, so a hard
+-- "zero survivors" gate would strand them bootstrap-only forever. Residual
+-- survivors below the threshold are recorded honestly per scope
+-- (last_mutation_status = "survived") rather than masked as "passed".
+local MANIFEST_MIN_KILL_SCORE = 90
+
 local function _parse_exit_code(ok, kind, code)
   if type(ok) == "number" then
     if ok > 255 then return math.floor(ok / 256) end
@@ -274,7 +282,7 @@ local function _no_site_updates(scopes, changed_scopes, initial_site_counts, tim
   return updates
 end
 
-local function _passed_scope_updates(results, timestamp, lane)
+local function _result_scope_updates(results, timestamp, lane)
   local updates = {}
   for _, result in ipairs(results or {}) do
     local scope_id = result.scope_id
@@ -292,6 +300,10 @@ local function _passed_scope_updates(results, timestamp, lane)
     update.last_mutation_sites = update.last_mutation_sites + 1
     if result.status == "killed" then
       update.last_mutation_killed = update.last_mutation_killed + 1
+    else
+      -- A surviving (or timed-out) mutant in this scope: record it honestly so
+      -- the manifest does not claim a clean "passed" for a scope with residue.
+      update.last_mutation_status = "survived"
     end
   end
   return updates
@@ -766,9 +778,9 @@ function engine.mutate(options, env)
   local total = #results
   local score = total > 0 and (killed / total * 100) or 100
   local manifest_updated = false
-  if survived == 0 and timed_out == 0 and not options.line_set then
+  if score >= MANIFEST_MIN_KILL_SCORE and timed_out == 0 and not options.line_set then
     local timestamp = _utc_timestamp()
-    local updates = _passed_scope_updates(results, timestamp, options.lane)
+    local updates = _result_scope_updates(results, timestamp, options.lane)
     _merge_updates(updates, _no_site_updates(scopes, changed_scopes, initial_site_counts, timestamp, options.lane))
     manifest_updated = _write_manifest_update(
       abs_target,
