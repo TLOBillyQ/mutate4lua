@@ -54,14 +54,32 @@ end
 
 local function _default_run_shell(shell_command, cwd, timeout_seconds)
   local output_path = util.tmp_path(".log")
+  local redirect = " > " .. util.shell_quote(output_path) .. " 2>&1"
   local full = "cd " .. util.shell_quote(cwd or ".") .. " && "
   if timeout_seconds and timeout_seconds > 0 then
     local tc = _find_timeout_command()
     if tc then
-      full = full .. tc .. " " .. tostring(math.ceil(timeout_seconds)) .. " "
+      full = full .. tc .. " " .. tostring(math.ceil(timeout_seconds)) .. " " .. shell_command .. redirect
+    else
+      -- No timeout(1) on this host: fall back to a pure-shell watchdog so a
+      -- runaway (e.g. infinite-loop) mutant cannot hang the run forever. The
+      -- watchdog touches a flag file before killing the command; the flag maps
+      -- the kill to the conventional 124 exit code, keeping timeout detection
+      -- identical to the timeout(1) path.
+      local flag = util.shell_quote(util.tmp_path(".timeout"))
+      local seconds = tostring(math.ceil(timeout_seconds))
+      full = full .. "{ "
+        .. "( " .. shell_command .. redirect .. " ) & pid=$!; "
+        .. "( sleep " .. seconds .. "; touch " .. flag .. "; kill -9 $pid 2>/dev/null ) & wp=$!; "
+        .. "wait $pid; ec=$?; "
+        .. "kill $wp 2>/dev/null; wait $wp 2>/dev/null; "
+        .. "if [ -f " .. flag .. " ]; then ec=" .. tostring(TIMEOUT_EXIT_CODE) .. "; fi; "
+        .. "rm -f " .. flag .. "; "
+        .. "exit $ec; } 2>/dev/null"
     end
+  else
+    full = full .. shell_command .. redirect
   end
-  full = full .. shell_command .. " > " .. util.shell_quote(output_path) .. " 2>&1"
 
   local start_time = os.time()
   local ok, kind, code = os.execute(full)
@@ -84,14 +102,26 @@ local function _create_workspace(source_dir)
   local workspace = util.tmp_path("_ws")
   util.remove(workspace)
   util.mkdir_p(workspace)
-  os.execute("cp -r " .. util.shell_quote(source_dir .. "/.") .. " " .. util.shell_quote(workspace .. "/"))
+  local ok, kind, code = os.execute("cp -r " .. util.shell_quote(source_dir .. "/.") .. " " .. util.shell_quote(workspace .. "/"))
+  local exit_code = _parse_exit_code(ok, kind, code)
+  if exit_code ~= 0 then
+    util.remove(workspace)
+    return nil, "failed to copy workspace (exit " .. tostring(exit_code) .. ")"
+  end
   return workspace
 end
 
 local function _create_workspaces(source_dir, count)
   local workspaces = {}
   for _ = 1, count do
-    workspaces[#workspaces + 1] = _create_workspace(source_dir)
+    local workspace, err = _create_workspace(source_dir)
+    if not workspace then
+      for _, created in ipairs(workspaces) do
+        util.remove(created)
+      end
+      return nil, err
+    end
+    workspaces[#workspaces + 1] = workspace
   end
   return workspaces
 end
@@ -183,7 +213,7 @@ local function _scope_manifest_map(old_manifest)
   return old_scopes
 end
 
-local function _changed_scope_lookup(scopes, old_manifest)
+local function _changed_scope_lookup(scopes, old_manifest, lane)
   if not old_manifest then
     local changed_scopes = {}
     for _, scope in ipairs(scopes or {}) do
@@ -197,6 +227,10 @@ local function _changed_scope_lookup(scopes, old_manifest)
   for _, scope in ipairs(scopes) do
     local old_scope = old_scopes[scope.id]
     if old_scope == nil or old_scope.semantic_hash ~= scope.semantic_hash then
+      changed_scopes[scope.id] = true
+    elseif lane ~= nil and old_scope.last_mutation_lane ~= nil and old_scope.last_mutation_lane ~= lane then
+      -- Recorded under a different lane: re-test instead of skipping on
+      -- evidence that may not hold for the current lane's suites.
       changed_scopes[scope.id] = true
     end
   end
@@ -362,11 +396,81 @@ local function _build_driver_command(driver_path, lane, suite_list_file, coverag
   return _shell_join(parts)
 end
 
+-- Driver-based runs need both a driver script and a lane; without them the
+-- command line would silently degrade to "--lane 'nil'" / ".../nil" garbage.
+local function _check_driver_options(stderr, options)
+  if not options.driver_script then
+    stderr:write("error: driver script required\n")
+    return false
+  end
+  if not options.lane then
+    stderr:write("error: lane required\n")
+    return false
+  end
+  return true
+end
+
+-- Shared "nothing to mutate" exit: records no-site manifest updates (unless a
+-- line filter suppresses them) and emits the empty result in text or JSON.
+-- Callers differ only in the headline message, the reported baseline seconds,
+-- and any cleanup they do afterwards.
+local function _emit_empty_result(stdout, options, scan_ctx, message, baseline_seconds)
+  local manifest_updated = false
+  if not options.line_set then
+    manifest_updated = _write_manifest_update(
+      scan_ctx.abs_target,
+      scan_ctx.stripped,
+      project.find_root(scan_ctx.workspace_root, scan_ctx.abs_target),
+      scan_ctx.scopes,
+      scan_ctx.old_manifest,
+      scan_ctx.changed_scopes,
+      _no_site_updates(scan_ctx.scopes, scan_ctx.changed_scopes, scan_ctx.initial_site_counts, _utc_timestamp(), options.lane)
+    )
+  end
+  if options.json then
+    stdout:write(util.encode_json({
+      file = scan_ctx.relative,
+      total_sites = 0,
+      killed = 0,
+      survived = 0,
+      timeout = 0,
+      score = 100,
+      baseline_seconds = baseline_seconds,
+      manifest_updated = manifest_updated,
+      mutations = {},
+    }), "\n")
+  else
+    stdout:write(message, "\n")
+    if manifest_updated then
+      stdout:write("manifest updated: ", scan_ctx.relative, "\n")
+    end
+  end
+  return 0
+end
+
 local function _suite_map_cache_path(workspace_root, lane, hash)
   return util.join_path(workspace_root, ".mutate4lua", "cache",
     "suite_file_map." .. lane .. "." .. hash .. ".json")
 end
 
+-- Drop cached maps for the same lane under older fingerprints before writing
+-- a new one, so the cache directory does not slowly accumulate one file per
+-- spec/driver edit.
+local function _purge_stale_suite_maps(workspace_root, lane, keep_path)
+  local cache_dir = util.join_path(workspace_root, ".mutate4lua", "cache")
+  if not util.is_directory(cache_dir) then return end
+  local prefix = "suite_file_map." .. lane .. "."
+  for _, path in ipairs(util.list_files(cache_dir, {"suite_file_map.*.json"})) do
+    if util.starts_with(util.basename(path), prefix) and path ~= keep_path then
+      util.remove(path)
+    end
+  end
+end
+
+-- NOTE: the fingerprint covers spec/*.lua and the driver script only, not the
+-- lib/ sources; a lib-only change keeps the cached map until a spec or the
+-- driver changes. Suite -> file mapping rarely depends on lib contents, so
+-- this is accepted rather than hashing the whole tree.
 local function _spec_and_driver_fingerprint(workspace_root, driver_script)
   local parts = {}
   local driver_path = util.join_path(workspace_root, driver_script)
@@ -427,6 +531,7 @@ local function _fetch_suite_file_map(run_shell, workspace_root, driver_script, l
     return nil, "suite-file map malformed (missing suite_files table)"
   end
 
+  _purge_stale_suite_maps(workspace_root, lane, cache_path)
   _store_cached_suite_map(cache_path, raw)
   return map, nil
 end
@@ -455,14 +560,35 @@ local function _discover_relevant_suites(run_shell, workspace_root, driver_scrip
   return suite_file, nil
 end
 
+-- Mirrors util's (module-local) is_absolute_path/is_windows_path, which are
+-- not exported: leading "/", UNC "\\", or a Windows drive prefix.
+local function _is_absolute_path(path)
+  path = tostring(path or "")
+  return path:sub(1, 1) == "/" or path:sub(1, 2) == "\\\\" or path:match("^%a:[/\\]") ~= nil
+end
+
 local function _scan_target(workspace_root, target)
-  local abs_target = util.absolute_path(util.join_path(workspace_root, target))
+  local abs_target
+  if _is_absolute_path(target) then
+    -- join_path strips leading slashes, which would corrupt an absolute target
+    abs_target = util.absolute_path(target)
+  else
+    abs_target = util.absolute_path(util.join_path(workspace_root, target))
+  end
   local source = util.read_file(abs_target)
   if not source then return nil, nil, nil, "cannot read " .. target end
   local relative = project.relative_file(workspace_root, abs_target)
   local stripped = manifest.strip(source)
   local data = scanner.analyze(abs_target, relative, stripped)
   return data, stripped, abs_target, nil
+end
+
+-- A target resolving outside the workspace root would make every mutant write
+-- outside the workspace (and silently "survive"); reject it at the entrypoints.
+local function _target_outside_workspace(relative_file)
+  return _is_absolute_path(relative_file)
+    or relative_file == ".."
+    or util.starts_with(relative_file, "../")
 end
 
 function engine.scan(options, env)
@@ -478,6 +604,10 @@ function engine.scan(options, env)
   local data, _, _, err = _scan_target(workspace_root, options.target)
   if not data then
     stderr:write("error: ", err, "\n")
+    return 1
+  end
+  if _target_outside_workspace(data.relative_file) then
+    stderr:write("error: target file escapes workspace root: ", options.target, "\n")
     return 1
   end
 
@@ -539,6 +669,12 @@ function engine.mutate(options, env)
   local run_parallel = env.run_parallel or parallel.run
   local timeout_factor = options.timeout_factor or 15
 
+  -- "--lines ''" parses to an empty (but truthy) table; treat it as no filter,
+  -- otherwise every site would run while manifest updates stayed suppressed.
+  if options.line_set and not next(options.line_set) then
+    options.line_set = nil
+  end
+
   if not options.target then
     stderr:write("error: target file required\n")
     return 1
@@ -549,13 +685,27 @@ function engine.mutate(options, env)
     stderr:write("error: ", scan_err, "\n")
     return 1
   end
+  if _target_outside_workspace(data.relative_file) then
+    stderr:write("error: target file escapes workspace root: ", options.target, "\n")
+    return 1
+  end
 
   local relative = data.relative_file
   local sites = data.sites
   local scopes = data.scopes
   local old_manifest = manifest.read(abs_target)
-  local changed_scopes = _changed_scope_lookup(scopes, old_manifest)
+  local changed_scopes = _changed_scope_lookup(scopes, old_manifest, options.lane)
   local initial_site_counts = _site_counts_by_scope(data.sites)
+  local scan_ctx = {
+    workspace_root = workspace_root,
+    abs_target = abs_target,
+    stripped = stripped,
+    relative = relative,
+    scopes = scopes,
+    old_manifest = old_manifest,
+    changed_scopes = changed_scopes,
+    initial_site_counts = initial_site_counts,
+  }
 
   if not options.mutate_all then
     if old_manifest then
@@ -568,41 +718,14 @@ function engine.mutate(options, env)
   end
 
   if #sites == 0 then
-    local manifest_updated = false
-    if not options.line_set then
-      manifest_updated = _write_manifest_update(
-        abs_target,
-        stripped,
-        project.find_root(workspace_root, abs_target),
-        scopes,
-        old_manifest,
-        changed_scopes,
-        _no_site_updates(scopes, changed_scopes, initial_site_counts, _utc_timestamp(), options.lane)
-      )
-    end
-    if options.json then
-      stdout:write(util.encode_json({
-        file = relative,
-        total_sites = 0,
-        killed = 0,
-        survived = 0,
-        timeout = 0,
-        score = 100,
-        baseline_seconds = 0,
-        manifest_updated = manifest_updated,
-        mutations = {},
-      }), "\n")
-    else
-      stdout:write("no mutation sites to test\n")
-      if manifest_updated then
-        stdout:write("manifest updated: ", relative, "\n")
-      end
-    end
-    return 0
+    return _emit_empty_result(stdout, options, scan_ctx, "no mutation sites to test", 0)
   end
 
   local suite_list_file = nil
   if not options.test_command then
+    if not _check_driver_options(stderr, options) then
+      return 1
+    end
     local discover_err
     suite_list_file, discover_err = _discover_relevant_suites(
       run_shell, workspace_root, options.driver_script, options.lane, relative)
@@ -612,7 +735,12 @@ function engine.mutate(options, env)
     end
   end
 
-  local workspace = _create_workspace(workspace_root)
+  local workspace, workspace_err = _create_workspace(workspace_root)
+  if not workspace then
+    stderr:write("error: ", workspace_err, "\n")
+    _cleanup(suite_list_file)
+    return 1
+  end
   local coverage_file = nil
 
   local baseline_cmd
@@ -650,39 +778,9 @@ function engine.mutate(options, env)
   end
 
   if #sites == 0 then
-    if not options.json then
-      stdout:write("no covered mutation sites\n")
-    end
-    local manifest_updated = false
-    if not options.line_set then
-      manifest_updated = _write_manifest_update(
-        abs_target,
-        stripped,
-        project.find_root(workspace_root, abs_target),
-        scopes,
-        old_manifest,
-        changed_scopes,
-        _no_site_updates(scopes, changed_scopes, initial_site_counts, _utc_timestamp(), options.lane)
-      )
-    end
-    if manifest_updated and not options.json then
-      stdout:write("manifest updated: ", relative, "\n")
-    end
-    if options.json then
-      stdout:write(util.encode_json({
-        file = relative,
-        total_sites = 0,
-        killed = 0,
-        survived = 0,
-        timeout = 0,
-        score = 100,
-        baseline_seconds = baseline.elapsed,
-        manifest_updated = manifest_updated,
-        mutations = {},
-      }), "\n")
-    end
+    local code = _emit_empty_result(stdout, options, scan_ctx, "no covered mutation sites", baseline.elapsed)
     _cleanup(workspace, suite_list_file)
-    return 0
+    return code
   end
 
   if options.mutation_warning and #sites > options.mutation_warning then
@@ -709,47 +807,60 @@ function engine.mutate(options, env)
     if not options.json then
       stdout:write("workers: ", tostring(worker_count), " (parallel)\n")
     end
-    local extra_workspaces = create_workspaces(workspace_root, worker_count - 1)
+    local extra_workspaces, workspaces_err = create_workspaces(workspace_root, worker_count - 1)
+    if not extra_workspaces then
+      stderr:write("error: ", workspaces_err or "failed to create workspaces", "\n")
+      _cleanup(workspace, suite_list_file)
+      return 1
+    end
     local workspaces = { workspace }
     for _, ws in ipairs(extra_workspaces) do
       workspaces[#workspaces + 1] = ws
     end
 
     local completed = 0
-    local run_results = run_parallel({
-      worker_count = worker_count,
-      job_count = #sites,
-      workspaces = workspaces,
-      timeout = timeout,
-      timeout_command = _find_timeout_command(),
-      poll_interval = options.poll_interval,
-      prepare = function(i, ws)
-        util.write_file(util.join_path(ws, relative), scanner.apply_mutation(stripped, sites[i]))
-      end,
-      command = function(_, ws)
-        return _mutant_command(ws)
-      end,
-      on_complete = function(i, run_result)
-        if not options.json then
-          completed = completed + 1
-          local site = sites[i]
-          stdout:write(string.format("[%d/%d] L%d: %s ... %s (%ds)\n",
-            completed, #sites, site.line, site.description,
-            _classify_status(run_result), run_result.elapsed))
-        end
-      end,
-    })
+    -- A throw from run_parallel (or a short result table, treated as an error
+    -- below) must still clean up the extra workspaces before propagating.
+    local ok_run, run_results = pcall(function()
+      local collected = run_parallel({
+        worker_count = worker_count,
+        job_count = #sites,
+        workspaces = workspaces,
+        timeout = timeout,
+        timeout_command = _find_timeout_command(),
+        poll_interval = options.poll_interval,
+        prepare = function(i, ws)
+          util.write_file(util.join_path(ws, relative), scanner.apply_mutation(stripped, sites[i]))
+        end,
+        command = function(_, ws)
+          return _mutant_command(ws)
+        end,
+        on_complete = function(i, run_result)
+          if not options.json then
+            completed = completed + 1
+            local site = sites[i]
+            stdout:write(string.format("[%d/%d] L%d: %s ... %s (%ds)\n",
+              completed, #sites, site.line, site.description,
+              _classify_status(run_result), run_result.elapsed))
+          end
+        end,
+      })
 
-    for i, site in ipairs(sites) do
-      local run_result = run_results[i]
-      if run_result == nil then
-        error("mutate4lua: missing result for mutation site " .. tostring(i))
+      for i, site in ipairs(sites) do
+        local run_result = collected[i]
+        if run_result == nil then
+          error("mutate4lua: missing result for mutation site " .. tostring(i))
+        end
+        results[i] = _result_entry(site, run_result)
       end
-      results[i] = _result_entry(site, run_result)
-    end
+    end)
 
     for _, ws in ipairs(extra_workspaces) do
       util.remove(ws)
+    end
+    if not ok_run then
+      _cleanup(workspace, suite_list_file)
+      error(run_results, 0)
     end
   else
     local target_in_ws = util.join_path(workspace, relative)
@@ -845,6 +956,10 @@ function engine.update_manifest(options, env)
     stderr:write("error: ", scan_err, "\n")
     return 1
   end
+  if _target_outside_workspace(data.relative_file) then
+    stderr:write("error: target file escapes workspace root: ", options.target, "\n")
+    return 1
+  end
 
   local project_root = project.find_root(workspace_root, abs_target)
   local proj_hash = project.project_hash(project_root, abs_target, stripped)
@@ -865,28 +980,38 @@ function engine.index_suites(options, env)
   local workspace_root = env.cwd or "."
   local run_shell = env.run_shell or _default_run_shell
 
+  if not _check_driver_options(stderr, options) then
+    return 1
+  end
+
   local driver_path = util.join_path(workspace_root, options.driver_script)
   local cmd = _shell_join({"lua", driver_path, "--lane", options.lane, "--list-suites", "--json"})
   local result = run_shell(cmd, workspace_root, nil)
 
   local output = util.trim(result.output or "")
-  if output ~= "" then
-    if result.ok then
-      if options.json then
-        local suites = util.decode_json(output) or {}
-        stdout:write(util.encode_json({
-          ok = true,
-          suite_count = #suites,
-          suites = suites,
-        }), "\n")
-      else
-        stdout:write(output, "\n")
+  if result.ok then
+    if options.json then
+      local suites = util.decode_json(output)
+      if type(suites) ~= "table" then
+        stderr:write("error: suite list output is not valid JSON\n")
+        return 1
       end
-    else
-      stderr:write(output, "\n")
+      stdout:write(util.encode_json({
+        ok = true,
+        suite_count = #suites,
+        suites = suites,
+      }), "\n")
+    elseif output ~= "" then
+      stdout:write(output, "\n")
     end
+    return 0
   end
-  return result.ok and 0 or 1
+  if output ~= "" then
+    stderr:write(output, "\n")
+  else
+    stderr:write("error: suite listing failed (exit ", tostring(result.code), ")\n")
+  end
+  return 1
 end
 
 return engine
