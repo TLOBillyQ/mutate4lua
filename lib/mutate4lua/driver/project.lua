@@ -42,19 +42,24 @@ function project.relative_file(project_root, path)
 end
 function project.project_hash(project_root, target_file, stripped_source)
   local files = util.list_files(project_root, {"*.lua", "*.rockspec"})
+  local target_absolute = util.absolute_path(target_file)
   local parts = {}
   for _, path in ipairs(files) do
+    -- match against the root-relative path so that ignored segments in
+    -- ancestor directories of project_root do not skip the whole project
+    local relative = "/" .. project.relative_file(project_root, path)
     local skip = false
     for segment in pairs(ignored_segments) do
-      if path:find(segment, 1, true) then
+      if relative:find(segment, 1, true) then
         skip = true
         break
       end
     end
     if not skip then
-      local content = assert(util.read_file(path))
+      local content, read_err = util.read_file(path)
+      assert(content, "cannot read " .. path .. ": " .. tostring(read_err))
       content = util.normalize_newlines(content)
-      if util.absolute_path(path) == util.absolute_path(target_file) then
+      if util.absolute_path(path) == target_absolute then
         content = stripped_source
       end
       parts[#parts + 1] = project.relative_file(project_root, path)
@@ -84,7 +89,7 @@ function project.discover_test_files(project_root)
   }
   for _, directory in ipairs(patterns) do
     if util.is_directory(directory) then
-      local files = util.list_files(directory, {"*_spec.lua", "*_test.lua", "*.lua"})
+      local files = util.list_files(directory, {"*.lua"})
       for _, file in ipairs(files) do
         candidates[#candidates + 1] = file
       end

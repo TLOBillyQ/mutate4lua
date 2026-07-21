@@ -5,16 +5,26 @@ local function parse_args(argv)
     local token = argv[index]
     if token == "--root" then
       index = index + 1
+      if argv[index] == nil then
+        error("--root requires a value")
+      end
       args.root = argv[index]
     elseif token == "--coverage-file" then
       index = index + 1
+      if argv[index] == nil then
+        error("--coverage-file requires a value")
+      end
       args.coverage_file = argv[index]
     elseif token == "--tool-root" then
       index = index + 1
+      if argv[index] == nil then
+        error("--tool-root requires a value")
+      end
       args.tool_root = argv[index]
     elseif token == "--no-coverage" then
       args.coverage_file = nil
     elseif token == "--quiet" then
+      -- accepted for compatibility with the engine; this driver has no extra output to suppress
       args.quiet = true
     else
       error("Unknown test driver option: " .. tostring(token))
@@ -43,14 +53,28 @@ local function run()
   end
   local coverage = {}
   if args.coverage_file then
+    local prefix = (root == "/") and "/" or (root .. "/")
+    local source_cache = {}
+    -- note: the hook only covers the current coroutine; lines executed
+    -- inside coroutines spawned by the tests are not recorded
     debug.sethook(function()
       local info = debug.getinfo(2, "Sl")
-      if not info or not info.source or info.source:sub(1, 1) ~= "@" then
+      if not info or not info.source then
         return
       end
-      local path = util.absolute_path(info.source:sub(2))
-      if util.starts_with(path, root .. "/") and util.ends_with(path, ".lua") then
-        coverage[util.relative_path(root, path):gsub("\\", "/") .. ":" .. info.currentline] = true
+      local key = source_cache[info.source]
+      if key == nil then
+        key = false
+        if info.source:sub(1, 1) == "@" then
+          local path = util.absolute_path(info.source:sub(2))
+          if util.starts_with(path, prefix) and util.ends_with(path, ".lua") then
+            key = util.relative_path(root, path):gsub("\\", "/") .. ":"
+          end
+        end
+        source_cache[info.source] = key
+      end
+      if key then
+        coverage[key .. info.currentline] = true
       end
     end, "l")
   end
@@ -69,7 +93,7 @@ local function run()
     assert(util.write_file(args.coverage_file, table.concat(lines, "\n") .. "\n"))
   end
   if not ok then
-    io.stderr:write(message .. "\n")
+    io.stderr:write(tostring(message), "\n")
     return 1
   end
   return 0
