@@ -40,6 +40,16 @@ When `--test-command` is not provided, `mutate4lua` runs
 `spec/`, `test/`, and `tests/`, executes them with `dofile`, and writes line
 coverage for coverage-based filtering.
 
+## Tests
+
+The test suite uses a self-contained harness (`spec/harness.lua`) with no
+external dependencies:
+
+```sh
+lua spec/run.lua            # run all spec/*_spec.lua
+lua spec/run.lua spec/cli_spec.lua   # run specific files
+```
+
 ## Exit Codes
 
 - `0`: success, no surviving mutants, scan succeeded, or manifest update succeeded
@@ -69,4 +79,13 @@ lua tools/quality/mutate.lua --help
 lua tools/quality/mutate.lua src/demo/flag.lua --scan
 lua tools/quality/mutate.lua src/demo/flag.lua --mutate-all
 lua tools/quality/mutate.lua src/demo/flag.lua --update-manifest
+```
+
+## 测试
+
+测试使用自研的最小 harness（`spec/harness.lua`），无外部依赖：
+
+```sh
+lua spec/run.lua                       # 运行全部 spec/*_spec.lua
+lua spec/run.lua spec/cli_spec.lua     # 运行指定文件
 ```
