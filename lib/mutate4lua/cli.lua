@@ -10,7 +10,8 @@ local function _help_text(command_name)
     "子命令 / Subcommands:",
     "  (default)          运行变异测试 / run mutation tests",
     "  --scan             扫描变异位点 / scan mutation sites",
-    "  --update-manifest  写入 manifest / write manifest block",
+    "  --update-manifest  写入外部 manifest 存储 / write manifest to the external store",
+    "  --migrate-manifest 迁移旧 footer manifest 到外部存储 / migrate a legacy footer manifest into the store",
     "  --index-suites     列出 suites / list test suites",
     "",
     "选项 / Options:",
@@ -67,6 +68,8 @@ local function _parse_args(args)
       options.subcommand = "scan"
     elseif token == "--update-manifest" then
       options.subcommand = "update-manifest"
+    elseif token == "--migrate-manifest" then
+      options.subcommand = "migrate-manifest"
     elseif token == "--index-suites" then
       options.subcommand = "index-suites"
     elseif token == "--dry-run" then
@@ -112,11 +115,15 @@ local function _parse_args(args)
   return options
 end
 
+-- The library ships no default driver path: hosts pass their driver scripts
+-- through env (env.default_driver for the harness runner, env.busted_driver
+-- for the busted runner). A nil result makes the engine fail with a clear
+-- "driver script required" error wherever a driver is actually needed.
 local function _resolve_driver_script(options, env)
   if options.runner == "busted" then
-    return env.busted_driver or "tools/quality/mutate/busted_adapter.lua"
+    return env.busted_driver
   end
-  return env.default_driver or "tools/quality/mutate/driver.lua"
+  return env.default_driver
 end
 
 function cli.run(args, env)
@@ -124,7 +131,7 @@ function cli.run(args, env)
   local engine = env.engine or default_engine
   local stdout = env.stdout or io.stdout
   local stderr = env.stderr or io.stderr
-  local command_name = env.command_name or "tools/quality/mutate.lua"
+  local command_name = env.command_name or "mutate4lua"
 
   local ok, parsed_or_err = pcall(_parse_args, args or {})
   if not ok then
@@ -148,7 +155,7 @@ function cli.run(args, env)
     stderr:write("unsupported runner: ", tostring(options.runner), "\n")
     return 1
   end
-  if options.dry_run and (options.subcommand == "scan" or options.subcommand == "update-manifest") then
+  if options.dry_run and (options.subcommand == "scan" or options.subcommand == "update-manifest" or options.subcommand == "migrate-manifest") then
     stderr:write("--dry-run cannot be combined with --", options.subcommand, "\n")
     return 1
   end
@@ -172,6 +179,8 @@ function cli.run(args, env)
     return engine.scan(options, env)
   elseif options.subcommand == "update-manifest" then
     return engine.update_manifest(options, env)
+  elseif options.subcommand == "migrate-manifest" then
+    return engine.migrate_manifest(options, env)
   elseif options.subcommand == "index-suites" then
     return engine.index_suites(options, env)
   else

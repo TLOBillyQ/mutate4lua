@@ -1,4 +1,5 @@
 local manifest = require("mutate4lua.internal.manifest")
+local manifest_store = require("mutate4lua.manifest_store")
 local engine = require("mutate4lua.engine")
 local util = require("mutate4lua.util")
 
@@ -30,6 +31,20 @@ local function null_buffer()
   return {write = function() end}
 end
 
+-- Default store layout: <project_root>/.mutate4lua/manifest/<relative>.manifest.
+-- In these specs the tmp dir has no root marker, so find_root resolves to it.
+local function store_root(dir)
+  return util.join_path(dir, ".mutate4lua", "manifest")
+end
+
+local function read_store(dir, relative)
+  return manifest_store.read(store_root(dir), relative)
+end
+
+local function store_file_path(dir, relative)
+  return manifest_store.store_path(store_root(dir), relative)
+end
+
 local function make_shell(returns)
   local n = 0
   local self = {}
@@ -58,28 +73,29 @@ describe("engine.update_manifest", function()
   end)
   after_each(function() rm_rf(dir) end)
 
-  it("writes a v2 manifest tail with no lastMutation fields", function()
+  it("writes a v2 store entry with no lastMutation fields and leaves the target untouched", function()
     write_file(target_abs, "return true\n")
     local env = {cwd = dir, stdout = null_buffer(), stderr = null_buffer()}
     local code = engine.update_manifest({target = target_rel}, env)
     assert.are.equal(0, code)
-    local data = manifest.read(target_abs)
+    local data = read_store(dir, target_rel)
     assert.is_not_nil(data)
     assert.are.equal(2, data.version)
     for _, scope in ipairs(data.scopes) do
       assert.is_nil(scope.last_mutated_at)
       assert.is_nil(scope.last_mutation_status)
     end
+    -- the business source is never rewritten: no footer, byte-identical
+    assert.are.equal("return true\n", read_file(target_abs))
+    assert.is_nil(manifest.read(target_abs))
   end)
 
-  it("preserves scope ids and semantic hashes when migrating v1 to v2", function()
+  it("preserves scope ids and semantic hashes when upgrading a v1 store entry to v2", function()
     write_file(target_abs, "local function f()\n  return 1 == 2\nend\nreturn f\n")
     local env = {cwd = dir, stdout = null_buffer(), stderr = null_buffer()}
     engine.update_manifest({target = target_rel}, env)
-    local v2_initial = manifest.read(target_abs)
-    -- Hand-write a v1 tail using the same ids and hashes
-    local body = read_file(target_abs)
-    local stripped = manifest.strip(body)
+    local v2_initial = read_store(dir, target_rel)
+    -- Hand-write a v1 store body using the same ids and hashes
     local lines = {"version=1", "projectHash=" .. (v2_initial.project_hash or "x")}
     for i, scope in ipairs(v2_initial.scopes) do
       local prefix = "scope." .. (i - 1) .. "."
@@ -89,11 +105,10 @@ describe("engine.update_manifest", function()
       lines[#lines+1] = prefix .. "endLine=" .. tostring(scope.end_line)
       lines[#lines+1] = prefix .. "semanticHash=" .. scope.semantic_hash
     end
-    local v1_tail = "--[[ mutate4lua-manifest\n" .. table.concat(lines, "\n") .. "\n]]\n"
-    write_file(target_abs, stripped .. "\n" .. v1_tail)
-    assert.are.equal(1, manifest.read(target_abs).version)
+    write_file(store_file_path(dir, target_rel), table.concat(lines, "\n") .. "\n")
+    assert.are.equal(1, read_store(dir, target_rel).version)
     engine.update_manifest({target = target_rel}, env)
-    local v2_after = manifest.read(target_abs)
+    local v2_after = read_store(dir, target_rel)
     assert.are.equal(2, v2_after.version)
     assert.are.equal(#v2_initial.scopes, #v2_after.scopes)
     for i, scope in ipairs(v2_after.scopes) do
@@ -114,17 +129,19 @@ describe("engine.mutate write gating", function()
   end)
   after_each(function() rm_rf(dir) end)
 
-  it("writes a v2 manifest when all mutants are killed and --lines is unset", function()
+  it("writes a v2 store entry when all mutants are killed and --lines is unset", function()
     write_file(target_abs, "return true\n")
     local shell = make_shell({{ok = true}, {ok = false}})
     local env = {cwd = dir, run_shell = shell.fn, stdout = null_buffer(), stderr = null_buffer()}
     engine.mutate({target = target_rel, test_command = "true", json = true}, env)
-    local data = manifest.read(target_abs)
+    local data = read_store(dir, target_rel)
     assert.is_not_nil(data)
     assert.are.equal(2, data.version)
+    -- the target itself is never modified, even when a manifest is recorded
+    assert.are.equal("return true\n", read_file(target_abs))
   end)
 
-  it("leaves the file byte-identical when the kill score is below the threshold", function()
+  it("leaves the file byte-identical and writes no store entry when the kill score is below the threshold", function()
     -- single site, survives -> 0% kill score, well under the threshold
     write_file(target_abs, "return true\n")
     local before = read_file(target_abs)
@@ -132,6 +149,7 @@ describe("engine.mutate write gating", function()
     local env = {cwd = dir, run_shell = shell.fn, stdout = null_buffer(), stderr = null_buffer()}
     engine.mutate({target = target_rel, test_command = "true", json = true}, env)
     assert.are.equal(before, read_file(target_abs))
+    assert.is_nil(read_store(dir, target_rel))
   end)
 
   -- 10 mutation sites: `1`->0, five `<`->`<=`, four `and`->`or`.
@@ -147,7 +165,7 @@ describe("engine.mutate write gating", function()
     local shell = make_shell(returns)
     local env = {cwd = dir, run_shell = shell.fn, stdout = null_buffer(), stderr = null_buffer()}
     engine.mutate({target = target_rel, test_command = "true", json = true, max_workers = 1}, env)
-    local data = manifest.read(target_abs)
+    local data = read_store(dir, target_rel)
     assert.is_not_nil(data)
     assert.are.equal(2, data.version)
     local scope = data.scopes[1]
@@ -157,7 +175,7 @@ describe("engine.mutate write gating", function()
     assert.are.equal("survived", scope.last_mutation_status)
   end)
 
-  it("leaves the file byte-identical when the kill score is just under the threshold", function()
+  it("leaves the file byte-identical and writes no store entry when the kill score is just under the threshold", function()
     -- baseline + 8 killed; two mutants survive -> 8/10 = 80% < 90%, no record.
     write_file(target_abs, ten_site_body)
     local before = read_file(target_abs)
@@ -167,9 +185,10 @@ describe("engine.mutate write gating", function()
     local env = {cwd = dir, run_shell = shell.fn, stdout = null_buffer(), stderr = null_buffer()}
     engine.mutate({target = target_rel, test_command = "true", json = true, max_workers = 1}, env)
     assert.are.equal(before, read_file(target_abs))
+    assert.is_nil(read_store(dir, target_rel))
   end)
 
-  it("leaves the file byte-identical when --lines is set, even with all killed", function()
+  it("leaves the file byte-identical and writes no store entry when --lines is set, even with all killed", function()
     write_file(target_abs, "return true\n")
     local before = read_file(target_abs)
     local shell = make_shell({{ok = true}, {ok = false}})
@@ -181,6 +200,7 @@ describe("engine.mutate write gating", function()
       line_set = {[1] = true},
     }, env)
     assert.are.equal(before, read_file(target_abs))
+    assert.is_nil(read_store(dir, target_rel))
   end)
 end)
 
@@ -195,15 +215,17 @@ describe("engine.mutate differential filter", function()
   end)
   after_each(function() rm_rf(dir) end)
 
-  it("re-run after --update-manifest enumerates 0 sites and leaves the manifest byte-identical", function()
+  it("re-run after --update-manifest enumerates 0 sites and leaves the store entry byte-identical", function()
     write_file(target_abs, "return true\n")
     local env = {cwd = dir, stdout = null_buffer(), stderr = null_buffer()}
     engine.update_manifest({target = target_rel}, env)
-    local content_before = read_file(target_abs)
+    local target_before = read_file(target_abs)
+    local manifest_before = read_file(store_file_path(dir, target_rel))
     local shell = make_shell({})
     local env2 = {cwd = dir, run_shell = shell.fn, stdout = null_buffer(), stderr = null_buffer()}
     engine.mutate({target = target_rel, test_command = "true", json = true}, env2)
-    assert.are.equal(content_before, read_file(target_abs))
+    assert.are.equal(target_before, read_file(target_abs))
+    assert.are.equal(manifest_before, read_file(store_file_path(dir, target_rel)))
     assert.are.equal(0, shell.count())
   end)
 
@@ -294,15 +316,16 @@ describe("engine.mutate parallel path", function()
     assert.are.equal(0.05, captured.poll_interval)
   end)
 
-  it("writes a v2 manifest when every parallel mutant is killed", function()
+  it("writes a v2 store entry when every parallel mutant is killed", function()
     write_file(target_abs, multi_site_body)
     engine.mutate({
       target = target_rel, test_command = "true", json = true,
       mutate_all = true, max_workers = 4,
     }, parallel_env(function() return killed() end))
-    local data = manifest.read(target_abs)
+    local data = read_store(dir, target_rel)
     assert.is_not_nil(data)
     assert.are.equal(2, data.version)
+    assert.are.equal(multi_site_body, read_file(target_abs))
   end)
 
   it("leaves the file byte-identical when a parallel mutant survives", function()
@@ -318,5 +341,39 @@ describe("engine.mutate parallel path", function()
       return killed()
     end))
     assert.are.equal(before, read_file(target_abs))
+  end)
+end)
+
+
+describe("engine driver requirement", function()
+  local dir
+
+  before_each(function()
+    dir = tmp_dir()
+    write_file(util.join_path(dir, "m.lua"), "return true\n")
+  end)
+  after_each(function() rm_rf(dir) end)
+
+  local function capture_buffer(sink)
+    return {write = function(_, ...)
+      for _, piece in ipairs({...}) do sink[#sink + 1] = tostring(piece) end
+    end}
+  end
+
+  it("errors clearly when neither a driver script nor --test-command is available", function()
+    -- The library ships no default driver path; the host must provide one.
+    local err = {}
+    local env = {cwd = dir, stdout = null_buffer(), stderr = capture_buffer(err)}
+    local code = engine.mutate({target = "m.lua"}, env)
+    assert.are.equal(1, code)
+    assert.matches("driver script required", table.concat(err))
+  end)
+
+  it("errors in --index-suites too when no driver script is available", function()
+    local err = {}
+    local env = {cwd = dir, stdout = null_buffer(), stderr = capture_buffer(err)}
+    local code = engine.index_suites({lane = "behavior"}, env)
+    assert.are.equal(1, code)
+    assert.matches("driver script required", table.concat(err))
   end)
 end)

@@ -1,4 +1,5 @@
 local util = require("mutate4lua.util")
+local manifest_store = require("mutate4lua.manifest_store")
 local manifest = {}
 manifest.start_marker = "--[[ mutate4lua-manifest\n"
 manifest.end_marker = "]]"
@@ -51,81 +52,15 @@ function manifest.read(path)
   if not stop then
     return nil
   end
-  local body = util.trim(raw:sub(index + #manifest.start_marker, stop - 1))
-  local data = {scopes = {}}
-  local scope_map = {}
-  for line in body:gmatch("[^\n]+") do
-    local key, value = line:match("^([^=]+)=(.*)$")
-    if key then
-      local scope_index, field = key:match("^scope%.(%d+)%.(.+)$")
-      if scope_index then
-        scope_index = tonumber(scope_index) + 1
-        scope_map[scope_index] = scope_map[scope_index] or {}
-        scope_map[scope_index][field] = value
-      else
-        data[key] = value
-      end
-    end
-  end
-  -- Scope numbers may be non-contiguous; insert in sorted order so
-  -- data.scopes stays a dense array for ipairs consumers.
-  local ordered_keys = {}
-  for index_key in pairs(scope_map) do
-    ordered_keys[#ordered_keys + 1] = index_key
-  end
-  table.sort(ordered_keys)
-  for _, index_key in ipairs(ordered_keys) do
-    local scope = scope_map[index_key]
-    data.scopes[#data.scopes + 1] = {
-      id = scope.id,
-      kind = scope.kind,
-      start_line = tonumber(scope.startLine),
-      end_line = tonumber(scope.endLine),
-      semantic_hash = scope.semanticHash,
-      last_mutated_at = scope.lastMutatedAt,
-      last_mutation_lane = scope.lastMutationLane,
-      last_mutation_status = scope.lastMutationStatus,
-      last_mutation_sites = tonumber(scope.lastMutationSites),
-      last_mutation_killed = tonumber(scope.lastMutationKilled),
-    }
-  end
-  return {
-    version = tonumber(data.version or "1"),
-    project_hash = data.projectHash,
-    scopes = data.scopes,
-  }
+  local body = raw:sub(index + #manifest.start_marker, stop - 1)
+  -- Body parsing is shared with the external manifest store; a footer whose
+  -- body holds no parseable entry is treated as "no manifest".
+  return manifest_store.parse_body(body)
 end
 function manifest.serialize(data)
-  local lines = {
-    manifest.start_marker:sub(1, -2),
-    "version=" .. tostring(data.version or 2),
-    "projectHash=" .. tostring(data.project_hash or ""),
-  }
-  for index, scope in ipairs(data.scopes or {}) do
-    local key = string.format("scope.%d.", index - 1)
-    lines[#lines + 1] = key .. "id=" .. tostring(scope.id)
-    lines[#lines + 1] = key .. "kind=" .. tostring(scope.kind)
-    lines[#lines + 1] = key .. "startLine=" .. tostring(scope.start_line)
-    lines[#lines + 1] = key .. "endLine=" .. tostring(scope.end_line)
-    lines[#lines + 1] = key .. "semanticHash=" .. tostring(scope.semantic_hash)
-    if scope.last_mutated_at ~= nil then
-      lines[#lines + 1] = key .. "lastMutatedAt=" .. tostring(scope.last_mutated_at)
-    end
-    if scope.last_mutation_lane ~= nil then
-      lines[#lines + 1] = key .. "lastMutationLane=" .. tostring(scope.last_mutation_lane)
-    end
-    if scope.last_mutation_status ~= nil then
-      lines[#lines + 1] = key .. "lastMutationStatus=" .. tostring(scope.last_mutation_status)
-    end
-    if scope.last_mutation_sites ~= nil then
-      lines[#lines + 1] = key .. "lastMutationSites=" .. tostring(scope.last_mutation_sites)
-    end
-    if scope.last_mutation_killed ~= nil then
-      lines[#lines + 1] = key .. "lastMutationKilled=" .. tostring(scope.last_mutation_killed)
-    end
-  end
-  lines[#lines + 1] = manifest.end_marker
-  return table.concat(lines, "\n") .. "\n"
+  return manifest.start_marker
+    .. manifest_store.serialize_body(data)
+    .. manifest.end_marker .. "\n"
 end
 function manifest.write(path, source_without_manifest, data)
   -- Normalize only the trailing newlines and keep the head byte-for-byte:

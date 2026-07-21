@@ -1,5 +1,6 @@
 local scanner = require("mutate4lua.internal.scanner")
 local manifest = require("mutate4lua.internal.manifest")
+local manifest_store = require("mutate4lua.manifest_store")
 local project = require("mutate4lua.driver.project")
 local parallel = require("mutate4lua.internal.parallel")
 local util = require("mutate4lua.util")
@@ -359,18 +360,46 @@ local function _updates_cover_changed_scopes(scopes, changed_scopes, updates)
   return true
 end
 
-local function _write_manifest_update(abs_target, stripped, project_root, scopes, old_manifest, changed_scopes, updates)
+-- Mirrors util's (module-local) is_absolute_path/is_windows_path, which are
+-- not exported: leading "/", UNC "\\", or a Windows drive prefix.
+local function _is_absolute_path(path)
+  path = tostring(path or "")
+  return path:sub(1, 1) == "/" or path:sub(1, 2) == "\\\\" or path:match("^%a:[/\\]") ~= nil
+end
+
+-- Manifests live outside the target sources: one "<relative>.manifest" file
+-- per target under the store root. Default is "<project_root>/.mutate4lua/manifest/"
+-- (next to the existing ".mutate4lua/cache" convention); hosts may override it
+-- with env.manifest_dir (relative paths resolve against the workspace root).
+local function _resolve_store_root(workspace_root, project_root, env)
+  local override = env and env.manifest_dir or nil
+  if override ~= nil and override ~= "" then
+    if _is_absolute_path(override) then
+      return util.absolute_path(override)
+    end
+    return util.absolute_path(util.join_path(workspace_root, override))
+  end
+  return util.join_path(project_root, ".mutate4lua", "manifest")
+end
+
+-- Store-first read with a legacy fallback: projects not yet migrated keep
+-- their footer manifest working until --migrate-manifest moves it out.
+local function _read_manifest(store_root, relative, abs_target)
+  return manifest_store.read(store_root, relative) or manifest.read(abs_target)
+end
+
+local function _write_manifest_update(scan_ctx, updates)
   if updates == nil or next(updates) == nil then
     return false
   end
-  if not _updates_cover_changed_scopes(scopes, changed_scopes, updates) then
+  if not _updates_cover_changed_scopes(scan_ctx.scopes, scan_ctx.changed_scopes, updates) then
     return false
   end
-  local proj_hash = project.project_hash(project_root, abs_target, stripped)
-  manifest.write(abs_target, stripped, {
+  local proj_hash = project.project_hash(scan_ctx.project_root, scan_ctx.abs_target, scan_ctx.stripped)
+  manifest_store.write(scan_ctx.store_root, scan_ctx.relative, {
     version = 2,
     project_hash = proj_hash,
-    scopes = _build_manifest_scopes(scopes, old_manifest, updates),
+    scopes = _build_manifest_scopes(scan_ctx.scopes, scan_ctx.old_manifest, updates),
   })
   return true
 end
@@ -398,9 +427,12 @@ end
 
 -- Driver-based runs need both a driver script and a lane; without them the
 -- command line would silently degrade to "--lane 'nil'" / ".../nil" garbage.
+-- The library ships no default driver path: the host provides one via
+-- env.default_driver / env.busted_driver, or bypasses drivers entirely with
+-- --test-command.
 local function _check_driver_options(stderr, options)
   if not options.driver_script then
-    stderr:write("error: driver script required\n")
+    stderr:write("error: driver script required: pass --test-command or provide a driver script via env.default_driver / env.busted_driver (see README)\n")
     return false
   end
   if not options.lane then
@@ -418,12 +450,7 @@ local function _emit_empty_result(stdout, options, scan_ctx, message, baseline_s
   local manifest_updated = false
   if not options.line_set then
     manifest_updated = _write_manifest_update(
-      scan_ctx.abs_target,
-      scan_ctx.stripped,
-      project.find_root(scan_ctx.workspace_root, scan_ctx.abs_target),
-      scan_ctx.scopes,
-      scan_ctx.old_manifest,
-      scan_ctx.changed_scopes,
+      scan_ctx,
       _no_site_updates(scan_ctx.scopes, scan_ctx.changed_scopes, scan_ctx.initial_site_counts, _utc_timestamp(), options.lane)
     )
   end
@@ -560,13 +587,6 @@ local function _discover_relevant_suites(run_shell, workspace_root, driver_scrip
   return suite_file, nil
 end
 
--- Mirrors util's (module-local) is_absolute_path/is_windows_path, which are
--- not exported: leading "/", UNC "\\", or a Windows drive prefix.
-local function _is_absolute_path(path)
-  path = tostring(path or "")
-  return path:sub(1, 1) == "/" or path:sub(1, 2) == "\\\\" or path:match("^%a:[/\\]") ~= nil
-end
-
 local function _scan_target(workspace_root, target)
   local abs_target
   if _is_absolute_path(target) then
@@ -693,7 +713,9 @@ function engine.mutate(options, env)
   local relative = data.relative_file
   local sites = data.sites
   local scopes = data.scopes
-  local old_manifest = manifest.read(abs_target)
+  local project_root = project.find_root(workspace_root, abs_target)
+  local store_root = _resolve_store_root(workspace_root, project_root, env)
+  local old_manifest = _read_manifest(store_root, relative, abs_target)
   local changed_scopes = _changed_scope_lookup(scopes, old_manifest, options.lane)
   local initial_site_counts = _site_counts_by_scope(data.sites)
   local scan_ctx = {
@@ -701,6 +723,8 @@ function engine.mutate(options, env)
     abs_target = abs_target,
     stripped = stripped,
     relative = relative,
+    project_root = project_root,
+    store_root = store_root,
     scopes = scopes,
     old_manifest = old_manifest,
     changed_scopes = changed_scopes,
@@ -893,15 +917,7 @@ function engine.mutate(options, env)
     local timestamp = _utc_timestamp()
     local updates = _result_scope_updates(results, timestamp, options.lane)
     _merge_updates(updates, _no_site_updates(scopes, changed_scopes, initial_site_counts, timestamp, options.lane))
-    manifest_updated = _write_manifest_update(
-      abs_target,
-      stripped,
-      project.find_root(workspace_root, abs_target),
-      scopes,
-      old_manifest,
-      changed_scopes,
-      updates
-    )
+    manifest_updated = _write_manifest_update(scan_ctx, updates)
   end
 
   if options.json then
@@ -962,15 +978,80 @@ function engine.update_manifest(options, env)
   end
 
   local project_root = project.find_root(workspace_root, abs_target)
+  local store_root = _resolve_store_root(workspace_root, project_root, env)
   local proj_hash = project.project_hash(project_root, abs_target, stripped)
 
-  manifest.write(abs_target, stripped, {
+  manifest_store.write(store_root, data.relative_file, {
     version = 2,
     project_hash = proj_hash,
     scopes = data.scopes,
   })
 
   stdout:write("manifest updated: ", data.relative_file, "\n")
+  return 0
+end
+
+-- One-shot migration for projects that still carry legacy in-source footer
+-- manifests: move the footer into the external store (preserving every field)
+-- and rewrite the target without the footer. Idempotent — a target without a
+-- footer whose store entry already exists is reported as already migrated.
+function engine.migrate_manifest(options, env)
+  local stderr = env.stderr or io.stderr
+  local stdout = env.stdout or io.stdout
+  local workspace_root = env.cwd or "."
+
+  if not options.target then
+    stderr:write("error: target file required\n")
+    return 1
+  end
+
+  local data, _, abs_target, scan_err = _scan_target(workspace_root, options.target)
+  if not data then
+    stderr:write("error: ", scan_err, "\n")
+    return 1
+  end
+  if _target_outside_workspace(data.relative_file) then
+    stderr:write("error: target file escapes workspace root: ", options.target, "\n")
+    return 1
+  end
+
+  local relative = data.relative_file
+  local project_root = project.find_root(workspace_root, abs_target)
+  local store_root = _resolve_store_root(workspace_root, project_root, env)
+
+  local footer = manifest.read(abs_target)
+  if footer then
+    manifest_store.write(store_root, relative, footer)
+    -- Rewrite the target without the footer (temp + rename, same style as the
+    -- legacy footer writer); strip() keeps the head byte-for-byte.
+    local stripped = manifest.strip(util.read_file(abs_target))
+    local part_path = abs_target .. ".part"
+    assert(util.write_file(part_path, stripped))
+    assert(os.rename(part_path, abs_target))
+    if options.json then
+      stdout:write(util.encode_json({
+        file = relative,
+        migrated = true,
+        store_path = manifest_store.store_path(store_root, relative),
+      }), "\n")
+    else
+      stdout:write("manifest migrated: ", relative, "\n")
+    end
+    return 0
+  end
+
+  local stored = manifest_store.read(store_root, relative)
+  if options.json then
+    stdout:write(util.encode_json({
+      file = relative,
+      migrated = false,
+      already_migrated = stored ~= nil,
+    }), "\n")
+  elseif stored then
+    stdout:write("manifest already migrated: ", relative, "\n")
+  else
+    stdout:write("no manifest to migrate: ", relative, "\n")
+  end
   return 0
 end
 
