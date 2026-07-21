@@ -1,9 +1,12 @@
 local util = {}
 local sep = package.config:sub(1, 1)
 
+-- Shell commands built here (find/rm/mkdir/test/pwd) assume a POSIX shell;
+-- the Windows path branches only keep path-string handling correct.
+
 local function shell_quote(value)
   value = tostring(value)
-  if value:find("%z") then
+  if value:find("\0", 1, true) then
     error("Refusing to shell-quote NUL characters")
   end
   return "'" .. value:gsub("'", "'\\''") .. "'"
@@ -119,8 +122,11 @@ function util.read_file(path)
   if not handle then
     return nil, err
   end
-  local data = handle:read("*a")
+  local data, read_err = handle:read("*a")
   handle:close()
+  if data == nil then
+    return nil, read_err
+  end
   return data
 end
 
@@ -129,8 +135,15 @@ function util.write_file(path, content)
   if not handle then
     return nil, err
   end
-  handle:write(content)
-  handle:close()
+  local ok, write_err = handle:write(content)
+  if not ok then
+    handle:close()
+    return nil, write_err
+  end
+  local closed, close_err = handle:close()
+  if not closed then
+    return nil, close_err
+  end
   return true
 end
 
@@ -184,7 +197,7 @@ function util.mkdir_p(path)
 end
 
 function util.remove(path)
-  os.execute("rm -rf " .. shell_quote(path))
+  return util.command_succeeds("rm -rf " .. shell_quote(path))
 end
 
 function util.parent_dir(path)
@@ -195,7 +208,7 @@ function util.parent_dir(path)
   local prefix, remainder = split_prefix(normalized)
   local segments = split_segments(remainder)
   if #segments == 0 then
-    return prefix == "" and "." or prefix:gsub("/$", "")
+    return prefix == "" and "." or (prefix:gsub("/$", ""))
   end
   segments[#segments] = nil
   local joined = table.concat(segments, "/")
@@ -203,7 +216,8 @@ function util.parent_dir(path)
     return joined == "" and "." or joined
   end
   if joined == "" then
-    return prefix:gsub("/$", "")
+    local stripped = prefix:gsub("/$", "")
+    return stripped == "" and "/" or stripped
   end
   return prefix .. joined
 end
@@ -318,7 +332,14 @@ local function encode_json(value)
   if value_type == "nil" then
     return "null"
   end
-  if value_type == "boolean" or value_type == "number" then
+  if value_type == "boolean" then
+    return tostring(value)
+  end
+  if value_type == "number" then
+    -- NaN and Inf are not valid JSON; encode them as null.
+    if value ~= value or value == math.huge or value == -math.huge then
+      return "null"
+    end
     return tostring(value)
   end
   if value_type == "string" then
@@ -329,6 +350,7 @@ local function encode_json(value)
       :gsub('\n', '\\n')
       :gsub('\r', '\\r')
       :gsub('\t', '\\t')
+      :gsub('[%c]', function(c) return string.format('\\u%04x', c:byte()) end)
     return '"' .. escaped .. '"'
   end
   if value_type ~= "table" then
@@ -379,9 +401,18 @@ local function _json_decode(text, pos)
         if nc == 'n' then parts[#parts + 1] = '\n'
         elseif nc == 't' then parts[#parts + 1] = '\t'
         elseif nc == 'r' then parts[#parts + 1] = '\r'
+        elseif nc == 'b' then parts[#parts + 1] = '\b'
+        elseif nc == 'f' then parts[#parts + 1] = '\f'
         elseif nc == '"' then parts[#parts + 1] = '"'
         elseif nc == '\\' then parts[#parts + 1] = '\\'
         elseif nc == '/' then parts[#parts + 1] = '/'
+        elseif nc == 'u' then
+          -- Basic \uXXXX support: only the single-byte range our encoder emits.
+          local hex = text:match('^(%x%x%x%x)', cursor + 2)
+          local code = hex and tonumber(hex, 16)
+          if not code or code > 0xff then return nil, pos end
+          parts[#parts + 1] = string.char(code)
+          cursor = cursor + 4
         else parts[#parts + 1] = nc end
         cursor = cursor + 2
       elseif c == '"' then
@@ -399,12 +430,16 @@ local function _json_decode(text, pos)
     while true do
       local key, val
       key, pos = _json_decode(text, pos)
+      if key == nil or pos == nil then return nil end
       pos = text:match("^%s*:%s*()", pos)
+      if pos == nil then return nil end
       val, pos = _json_decode(text, pos)
+      if pos == nil then return nil end
       obj[key] = val
       pos = text:match("^%s*()", pos)
       if text:sub(pos, pos) == '}' then return obj, pos + 1 end
       pos = text:match("^%s*,%s*()", pos)
+      if pos == nil then return nil end
     end
   elseif ch == '[' then
     local arr = {}
@@ -413,10 +448,12 @@ local function _json_decode(text, pos)
     while true do
       local val
       val, pos = _json_decode(text, pos)
+      if pos == nil then return nil end
       arr[#arr + 1] = val
       pos = text:match("^%s*()", pos)
       if text:sub(pos, pos) == ']' then return arr, pos + 1 end
       pos = text:match("^%s*,%s*()", pos)
+      if pos == nil then return nil end
     end
   elseif text:sub(pos, pos + 3) == 'true' then
     return true, pos + 4
@@ -433,7 +470,9 @@ end
 
 function util.decode_json(text)
   if type(text) ~= "string" or text == "" then return nil end
-  local value = _json_decode(text, 1)
+  local value, pos = _json_decode(text, 1)
+  if value == nil or pos == nil then return nil end
+  if text:match("^%s*()", pos) <= #text then return nil end
   return value
 end
 
@@ -466,7 +505,7 @@ function util.fnv1a64(text)
         "  local p = 0x100000001b3",
         "  for i = 1, #t do",
         "    h = h ~ t:byte(i)",
-        "    h = (h * p) & 0xFFFFFFFFFFFFFFFF",
+        "    h = h * p",
         "  end",
         "  return string.format('%016x', h)",
         "end",
