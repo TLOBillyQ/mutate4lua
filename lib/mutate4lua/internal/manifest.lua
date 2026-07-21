@@ -2,8 +2,22 @@ local util = require("mutate4lua.util")
 local manifest = {}
 manifest.start_marker = "--[[ mutate4lua-manifest\n"
 manifest.end_marker = "]]"
+-- Position capture + escaped marker text, hoisted so the scan loop in
+-- start_index does not rebuild it for every candidate position.
+local start_pattern = "()%-%-%[%[ mutate4lua%-manifest\n"
 local function start_index(source)
-  local start_at = source:match("()" .. "%-%-%[%[ mutate4lua%-manifest\n")
+  -- The manifest block is always the LAST occurrence of the marker: marker
+  -- text inside an earlier string or comment must not truncate the source.
+  local start_at = nil
+  local from = 1
+  while true do
+    local at = source:match(start_pattern, from)
+    if not at then
+      break
+    end
+    start_at = at
+    from = at + 1
+  end
   if not start_at then
     return nil
   end
@@ -19,10 +33,15 @@ function manifest.strip(source)
   if not index then
     return source
   end
-  return util.trim(source:sub(1, index - 1)) .. "\n"
+  -- Collapse only the trailing newlines before the marker; leading blank
+  -- lines stay so line numbers and the project hash input do not shift.
+  return (source:sub(1, index - 1):gsub("\n+$", "")) .. "\n"
 end
 function manifest.read(path)
-  local raw = assert(util.read_file(path))
+  local raw = util.read_file(path)
+  if raw == nil then
+    return nil
+  end
   raw = util.normalize_newlines(raw)
   local index = start_index(raw)
   if not index then
@@ -48,8 +67,16 @@ function manifest.read(path)
       end
     end
   end
-  for index_key, scope in pairs(scope_map) do
-    data.scopes[index_key] = {
+  -- Scope numbers may be non-contiguous; insert in sorted order so
+  -- data.scopes stays a dense array for ipairs consumers.
+  local ordered_keys = {}
+  for index_key in pairs(scope_map) do
+    ordered_keys[#ordered_keys + 1] = index_key
+  end
+  table.sort(ordered_keys)
+  for _, index_key in ipairs(ordered_keys) do
+    local scope = scope_map[index_key]
+    data.scopes[#data.scopes + 1] = {
       id = scope.id,
       kind = scope.kind,
       start_line = tonumber(scope.startLine),
@@ -76,11 +103,11 @@ function manifest.serialize(data)
   }
   for index, scope in ipairs(data.scopes or {}) do
     local key = string.format("scope.%d.", index - 1)
-    lines[#lines + 1] = key .. "id=" .. scope.id
-    lines[#lines + 1] = key .. "kind=" .. scope.kind
+    lines[#lines + 1] = key .. "id=" .. tostring(scope.id)
+    lines[#lines + 1] = key .. "kind=" .. tostring(scope.kind)
     lines[#lines + 1] = key .. "startLine=" .. tostring(scope.start_line)
     lines[#lines + 1] = key .. "endLine=" .. tostring(scope.end_line)
-    lines[#lines + 1] = key .. "semanticHash=" .. scope.semantic_hash
+    lines[#lines + 1] = key .. "semanticHash=" .. tostring(scope.semantic_hash)
     if scope.last_mutated_at ~= nil then
       lines[#lines + 1] = key .. "lastMutatedAt=" .. tostring(scope.last_mutated_at)
     end
@@ -101,7 +128,13 @@ function manifest.serialize(data)
   return table.concat(lines, "\n") .. "\n"
 end
 function manifest.write(path, source_without_manifest, data)
-  local output = util.trim(source_without_manifest) .. "\n\n" .. manifest.serialize(data)
-  assert(util.write_file(path, output))
+  -- Normalize only the trailing newlines and keep the head byte-for-byte:
+  -- trimming leading blank lines would shift line numbers, and the written
+  -- file would differ from the strip() output the project hash covers.
+  -- Write via temp + rename so an interrupt cannot truncate the user source.
+  local output = (source_without_manifest:gsub("\n+$", "")) .. "\n\n" .. manifest.serialize(data)
+  local part_path = path .. ".part"
+  assert(util.write_file(part_path, output))
+  assert(os.rename(part_path, path))
 end
 return manifest
