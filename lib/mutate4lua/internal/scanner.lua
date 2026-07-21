@@ -31,6 +31,10 @@ local expression_breakers = {
   ["-"] = true,
   ["*"] = true,
   ["/"] = true,
+  ["%"] = true,
+  ["^"] = true,
+  ["~"] = true,
+  ["#"] = true,
   [".."] = true,
   ["and"] = true,
   ["or"] = true,
@@ -43,10 +47,9 @@ local expression_breakers = {
   ["until"] = true,
   [";"] = true,
 }
+-- for/while push via their `do`; pushing at the keyword too would double-push.
 local block_starters = {
   ["if"] = true,
-  ["for"] = true,
-  ["while"] = true,
 }
 local function previous_token(tokens, index)
   return tokens[index - 1]
@@ -76,12 +79,17 @@ local function function_name(tokens, index)
   end
   return table.concat(parts)
 end
-local function should_push_do(tokens, index)
-  local prev = previous_token(tokens, index)
-  if not prev then
-    return true
+local function line_count(text)
+  local count = 1
+  local index = 1
+  while true do
+    local found = text:find("\n", index, true)
+    if not found then
+      return count
+    end
+    count = count + 1
+    index = found + 1
   end
-  return not block_starters[prev.value]
 end
 local function build_scopes(source_file, relative_file, source, tokens)
   local scopes = {
@@ -89,7 +97,7 @@ local function build_scopes(source_file, relative_file, source, tokens)
       id = "chunk:" .. relative_file,
       kind = "chunk",
       start_line = 1,
-      end_line = #util.split_lines(source),
+      end_line = line_count(source),
       start_pos = 1,
       end_pos = #source,
     }
@@ -107,9 +115,7 @@ local function build_scopes(source_file, relative_file, source, tokens)
       elseif block_starters[token.value] then
         stack[#stack + 1] = {kind = token.value}
       elseif token.value == "do" then
-        if should_push_do(tokens, index) then
-          stack[#stack + 1] = {kind = "do"}
-        end
+        stack[#stack + 1] = {kind = "do"}
       elseif token.value == "repeat" then
         stack[#stack + 1] = {kind = "repeat"}
       elseif token.value == "until" then
@@ -122,8 +128,15 @@ local function build_scopes(source_file, relative_file, source, tokens)
       elseif token.value == "end" then
         local block = table.remove(stack)
         if block and block.kind == "function" then
+          local id = string.format("function:%s:%d", block.name, block.start_line)
+          for _, scope in ipairs(scopes) do
+            if scope.id == id then
+              id = id .. "@" .. block.start_pos
+              break
+            end
+          end
           scopes[#scopes + 1] = {
-            id = string.format("function:%s:%d", block.name, block.start_line),
+            id = id,
             kind = "function",
             start_line = block.start_line,
             end_line = token.line,
@@ -229,6 +242,47 @@ local function match_call(tokens, index)
   end
   return start_index, finish
 end
+-- A call in statement position can only be replaced by a statement, so the
+-- call -> nil site is only offered when the previous token proves expression
+-- position. Statement openers (`then`, `do`, `;`, chunk start) are absent.
+local call_expression_preceders = {
+  ["("] = true,
+  ["{"] = true,
+  ["["] = true,
+  [","] = true,
+  ["="] = true,
+  ["=="] = true,
+  ["~="] = true,
+  ["<"] = true,
+  ["<="] = true,
+  [">"] = true,
+  [">="] = true,
+  ["+"] = true,
+  ["-"] = true,
+  ["*"] = true,
+  ["/"] = true,
+  ["//"] = true,
+  ["<<"] = true,
+  [">>"] = true,
+  ["%"] = true,
+  ["^"] = true,
+  ["~"] = true,
+  ["#"] = true,
+  [".."] = true,
+  ["and"] = true,
+  ["or"] = true,
+  ["not"] = true,
+  ["return"] = true,
+  ["elseif"] = true,
+  ["until"] = true,
+}
+local function is_expression_call(tokens, index)
+  local prev = previous_token(tokens, index)
+  if not prev then
+    return false
+  end
+  return call_expression_preceders[prev.value] == true
+end
 local function add_call_site(sites, scopes, source, tokens, start_index, end_index)
   local start_token = tokens[start_index]
   local end_token = tokens[end_index]
@@ -247,6 +301,8 @@ local function add_call_site(sites, scopes, source, tokens, start_index, end_ind
   }
 end
 function scanner.analyze(source_file, relative_file, source)
+  -- analyze normalizes for its own position/slicing logic; lexer.tokenize
+  -- normalizes again (idempotent no-op) so tokenize stays self-contained.
   source = util.normalize_newlines(source)
   local tokens = lexer.tokenize(source)
   local scopes = build_scopes(source_file, relative_file, source, tokens)
@@ -287,7 +343,7 @@ function scanner.analyze(source_file, relative_file, source)
       add_site(sites, scopes, source, token, "nil", "replace " .. token.value .. " with nil")
     elseif token.type == "identifier" then
       local start_index, end_index = match_call(tokens, index)
-      if start_index and start_index == index then
+      if start_index and start_index == index and is_expression_call(tokens, start_index) then
         add_call_site(sites, scopes, source, tokens, start_index, end_index)
         index = end_index
       end

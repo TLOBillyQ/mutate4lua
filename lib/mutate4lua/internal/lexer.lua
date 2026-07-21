@@ -25,8 +25,16 @@ local keywords = {
   ["while"] = true,
 }
 local function count_newlines(text)
-  local _, count = text:gsub("\n", "\n")
-  return count
+  local count = 0
+  local index = 1
+  while true do
+    local found = text:find("\n", index, true)
+    if not found then
+      return count
+    end
+    count = count + 1
+    index = found + 1
+  end
 end
 local function long_bracket_equals(source, index)
   if source:sub(index, index) ~= "[" then
@@ -130,6 +138,8 @@ local function scan_number(source, index, length)
   return cursor - 1
 end
 function lexer.tokenize(source)
+  -- tokenize stays self-contained: callers may pass unnormalized source.
+  -- scanner.analyze normalizes before calling, making this a no-op there.
   source = util.normalize_newlines(source)
   local tokens = {}
   local index = 1
@@ -143,18 +153,17 @@ function lexer.tokenize(source)
       index = index + 1
     elseif current:match("%s") then
       index = index + 1
-      elseif current == "-" and next_char == "-" then
-        local equals_count = long_bracket_equals(source, index + 2)
-        if equals_count then
-          local start_index = index + 2
-          local close_index = close_long_bracket(source, start_index, equals_count)
-          if not close_index then
-            local chunk = source:sub(index)
-            line = line + count_newlines(chunk)
-            index = length + 1
-            break
-          end
-        local chunk_end = close_index + equals_count + 2
+    elseif current == "-" and next_char == "-" then
+      local equals_count = long_bracket_equals(source, index + 2)
+      if equals_count then
+        local start_index = index + 2
+        local close_index = close_long_bracket(source, start_index, equals_count)
+        if not close_index then
+          local chunk = source:sub(index)
+          line = line + count_newlines(chunk)
+          break
+        end
+        local chunk_end = close_index + equals_count + 1
         local chunk = source:sub(index, chunk_end)
         line = line + count_newlines(chunk)
         index = chunk_end + 1
@@ -196,7 +205,7 @@ function lexer.tokenize(source)
       local equals_count = long_bracket_equals(source, index)
       if equals_count then
         local close_index = close_long_bracket(source, index + 1, equals_count)
-        local cursor = close_index and (close_index + equals_count + 2) or length
+        local cursor = close_index and (close_index + equals_count + 1) or length
         local text = source:sub(index, cursor)
         tokens[#tokens + 1] = {
           type = "string",
@@ -232,11 +241,11 @@ function lexer.tokenize(source)
         line = line,
       }
       index = cursor + 1
-      elseif current:match("%d") then
-        local cursor = scan_number(source, index, length)
-        tokens[#tokens + 1] = {
-          type = "number",
-          value = source:sub(index, cursor),
+    elseif current:match("%d") then
+      local cursor = scan_number(source, index, length)
+      tokens[#tokens + 1] = {
+        type = "number",
+        value = source:sub(index, cursor),
         start_pos = index,
         end_pos = cursor,
         line = line,
@@ -248,7 +257,8 @@ function lexer.tokenize(source)
       local value
       if three == "..." then
         value = three
-      elseif two == "==" or two == "~=" or two == "<=" or two == ">=" or two == ".." then
+      elseif two == "==" or two == "~=" or two == "<=" or two == ">=" or two == ".."
+        or two == "//" or two == "<<" or two == ">>" then
         value = two
       else
         value = current
