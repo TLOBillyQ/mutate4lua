@@ -12,7 +12,6 @@ local function _help_text(command_name)
     "  --scan             扫描变异位点 / scan mutation sites",
     "  --update-manifest  写入 manifest / write manifest block",
     "  --index-suites     列出 suites / list test suites",
-    "  --dry-run          打印 suite 列表 / print suite list",
     "",
     "选项 / Options:",
     "  --lane behavior|contract   默认 behavior / default behavior",
@@ -24,9 +23,10 @@ local function _help_text(command_name)
     "  --timeout-factor N         超时倍数 / timeout multiplier (default 15)",
     "  --test-command CMD         自定义测试命令 / custom test command",
     "  --mutation-warning N       变异数量警告阈值",
+    "  --dry-run                  仅列出 suites 不执行（--index-suites 的修饰符）/ list suites only (modifier of --index-suites)",
     "  --json                     JSON 输出",
     "  --verbose                  详细输出",
-    "  --help                     显示帮助 / show help",
+    "  -h, --help                 显示帮助 / show help",
   }, "\n") .. "\n"
 end
 
@@ -34,6 +34,9 @@ local function _parse_line_set(text)
   local line_set = {}
   for num in tostring(text):gmatch("(%d+)") do
     line_set[tonumber(num)] = true
+  end
+  if not next(line_set) then
+    error("--lines requires a comma-separated list of line numbers", 0)
   end
   return line_set
 end
@@ -76,32 +79,32 @@ local function _parse_args(args)
       options.verbose = true
     elseif token == "--lane" then
       index = index + 1
-      options.lane = args[index] or error("--lane requires a value")
+      options.lane = args[index] or error("--lane requires a value", 0)
     elseif token == "--runner" then
       index = index + 1
-      options.runner = args[index] or error("--runner requires a value")
+      options.runner = args[index] or error("--runner requires a value", 0)
     elseif token == "--lines" then
       index = index + 1
-      options.line_set = _parse_line_set(args[index] or error("--lines requires a value"))
+      options.line_set = _parse_line_set(args[index] or error("--lines requires a value", 0))
     elseif token == "--max-workers" then
       index = index + 1
-      options.max_workers = tonumber(args[index] or "")
+      options.max_workers = tonumber(args[index] or "") or error("--max-workers requires a numeric value", 0)
     elseif token == "--poll-interval" then
       index = index + 1
-      options.poll_interval = tonumber(args[index] or "")
+      options.poll_interval = tonumber(args[index] or "") or error("--poll-interval requires a numeric value", 0)
     elseif token == "--timeout-factor" then
       index = index + 1
-      options.timeout_factor = tonumber(args[index] or "15") or 15
+      options.timeout_factor = tonumber(args[index] or "") or error("--timeout-factor requires a numeric value", 0)
     elseif token == "--test-command" then
       index = index + 1
-      options.test_command = args[index] or error("--test-command requires a value")
+      options.test_command = args[index] or error("--test-command requires a value", 0)
     elseif token == "--mutation-warning" then
       index = index + 1
-      options.mutation_warning = tonumber(args[index] or "0")
+      options.mutation_warning = tonumber(args[index] or "") or error("--mutation-warning requires a numeric value", 0)
     elseif options.target == nil and token:sub(1, 2) ~= "--" then
       options.target = token
     else
-      error("unknown option: " .. tostring(token))
+      error("unknown option: " .. tostring(token), 0)
     end
     index = index + 1
   end
@@ -126,7 +129,7 @@ function cli.run(args, env)
   local ok, parsed_or_err = pcall(_parse_args, args or {})
   if not ok then
     stderr:write(tostring(parsed_or_err), "\n")
-    stdout:write(_help_text(command_name))
+    stderr:write(_help_text(command_name))
     return 1
   end
 
@@ -143,6 +146,10 @@ function cli.run(args, env)
   end
   if options.runner ~= "harness" and options.runner ~= "busted" then
     stderr:write("unsupported runner: ", tostring(options.runner), "\n")
+    return 1
+  end
+  if options.dry_run and (options.subcommand == "scan" or options.subcommand == "update-manifest") then
+    stderr:write("--dry-run cannot be combined with --", options.subcommand, "\n")
     return 1
   end
 
