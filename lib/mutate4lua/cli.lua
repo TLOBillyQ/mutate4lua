@@ -149,10 +149,9 @@ function cli.run(args, env)
     return 1
   end
 
-  -- The library ships no default driver path: hosts pass their driver script
-  -- through env.default_driver. A nil result makes the engine fail with a clear
-  -- "driver script required" error wherever a driver is actually needed.
-  options.driver_script = env.default_driver
+  -- Runs go through the built-in luaunit runner (ADR-0005); the removed
+  -- env.default_driver hook is no longer read. --test-command remains as the
+  -- upstream escape hatch for hosts that cannot use the runner.
 
   if options.subcommand == "scan" then
     return engine.scan(options, env)

@@ -16,7 +16,7 @@ package.path = script_dir .. "/../lib/?.lua;" .. script_dir .. "/../lib/?/init.l
 
 local manifest = require("mutate4lua.internal.manifest")
 local scanner = require("mutate4lua.internal.scanner")
-local project = require("mutate4lua.driver.project")
+local project = require("mutate4lua.internal.project")
 local util = require("mutate4lua.util")
 
 local function is_absolute(path)

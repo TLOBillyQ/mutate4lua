@@ -31,20 +31,21 @@
   `0` ↔ `1`、右值 → `nil`（java 版右值 → `null` 的 Lua 对应）。
 - scope 身份以声明为基准，非行号为基准（java 规格 §7.3）。
 - worker 操作模块副本；原始文件永不在原地变异；超时的 mutant 视为已击杀。
+- 测试经**内建 luaunit runner**（`lib/mutate4lua/runner.lua`）运行——上游
+  "内置构建工具调用"（maven / `go test`）的 Lua 对应；宿主测试遵循
+  `test_*.lua` 约定（ADR-0005）。`--test-command` 为上游同款逃生舱。
 
 **有意偏离 (Deliberate Deviations)**
 
-- 宿主提供的 driver 脚本，而非内置构建工具调用（maven / `go test`）——Lua 无标准
-  构建或测试运行器；driver 契约为 Lua 对应方案（suites/lane 参数已移除，
-  ADR-0004）。
 - 覆盖率来源仅限于 **luacov** 产物（ADR-0003）——JaCoCo/coverprofile 的 Lua
-  对应方案；不接受 driver 生成的临时覆盖率格式。
+  对应方案；测试框架限定 luaunit（宿主生态已统一，ADR-0005）。
 - scope 语义 hash = 对归一化 AST 序列化结果取 FNV-1a（格式无关，clj 的 `pr-str`
   语义升级为 AST；上游三版不一——clj 格式无关 / go 空白归一化 / java 原始子串——
   因此选择符合 AST 迁移的语义，ADR-0001/0004）。
 
 **本分支的破坏性变更**：suites/`--lane`、`--json`、外部 manifest 存储、90% 自动
-记录规则及临时 driver 覆盖率均已移除。升级路径见"迁移"一节。
+记录规则及临时 driver 覆盖率均已移除；driver 契约（`env.default_driver`）已删除，
+测试改经内建 luaunit runner 运行（ADR-0005）。升级路径见"迁移"一节。
 
 ## 功能 (Features)
 
@@ -75,7 +76,6 @@
 package.path = "vendor/mutate4lua/lib/?.lua;vendor/mutate4lua/lib/?/init.lua;" .. package.path
 os.exit(require("mutate4lua.cli").run(arg, {
   cwd = ".",
-  default_driver = "tools/mutate/driver.lua",
   command_name = "lua tools/mutate.lua",
 }))
 ```
@@ -107,41 +107,44 @@ lua tools/mutate.lua src/demo/flag.lua --test-command "busted"
 | `--reuse-coverage` | 复用已有的 `luacov.report.out`，不重新生成 |
 | `--max-workers N` | 并行 worker 数（默认：CPU 核数的一半；`1` = 串行） |
 | `--timeout-factor N` | mutant 超时倍数，基于 baseline 时长（默认 `10`） |
-| `--test-command CMD` | 自定义测试命令，绕过 driver 契约 |
+| `--test-command CMD` | 自定义测试命令，绕过内建 runner（禁用覆盖率过滤） |
 | `--mutation-warning N` | 当选定位点数超过 N 时警告（默认 `50`） |
 | `--verbose` | 详细输出 |
 | `-h, --help` | 显示帮助 |
 
-## Driver 契约 (Driver Contract)
+## 内建 runner 与测试约定 (Built-in Runner)
 
-未提供 `--test-command` 时，引擎通过宿主提供的 driver 脚本（以
-`env.default_driver` 传入）驱动测试。本库**不提供默认 driver 路径**——无可用
-driver 时立即失败，报错
-`error: driver script required: pass --test-command or provide a driver script via env.default_driver (see README)`。
+未提供 `--test-command` 时，引擎调起内建 runner（`lib/mutate4lua/runner.lua`）
+驱动测试（ADR-0005）。宿主**无需提供任何脚本**，只需遵循测试约定：
 
-引擎按以下方式调用 driver 脚本：
+- 测试文件位于项目根的 `spec/`、`test/` 或 `tests/` 目录下，以 `test_*.lua`
+  命名（`fixtures/` 目录视为测试数据，跳过）；
+- 每个测试文件 `return` 一个 luaunit 测试表（方法以 `test` 开头）；
+- 被测模块按 `<root>/lib/?.lua`、`<root>/lib/?/init.lua`（及 `src/` 同型）
+  可被 `require`。
+
+引擎按以下方式调用 runner（cwd 为隔离工作区）：
 
 - baseline 运行（生成覆盖率）：
-  `lua <driver> --coverage-report <abs-path> --quiet`
+  `lua <runner> --coverage-report <abs-path> --quiet`
 - baseline 运行（`--mutate-all` 或 `--reuse-coverage`）：
-  `lua <driver> --no-coverage --quiet`
+  `lua <runner> --no-coverage --quiet`
 - mutant 运行：
-  `lua <driver> --no-coverage --fail-fast --quiet`
+  `lua <runner> --no-coverage --fail-fast --quiet`
 
 退出 `0` 表示测试通过（mutant 存活）；非零表示失败（mutant 被击杀）。引擎对运行
-施加自身的超时控制。
+施加自身的超时控制，超时的 mutant 计为已击杀。
 
-driver 必须在 `--coverage-report` 给定的绝对路径上产出标准
-`luacov.report.out`。引擎自行解析该报告，无需依赖 luacov 库。当宿主机未安装
-luacov 时，`--coverage-report` 应失败并给出明确提示；`--no-coverage` 运行仍须
-正常工作。
-
-`lib/mutate4lua/driver/default.lua` 可作为宿主 driver 的可用起点。
+runner 在 `--coverage-report` 给定的绝对路径上产出标准 `luacov.report.out`。
+引擎自行解析该报告，无需依赖 luacov 库。宿主未安装 luacov 时 baseline 失败并
+给出明确提示；`--no-coverage` 运行不受影响。测试框架（luaunit）与覆盖率工具
+（luacov）均经 luarocks 提供；不符合上述约定的宿主可使用 `--test-command`
+（该选项禁用覆盖率过滤并给出警告）。
 
 ### 真实 luacov 输出格式（解析器契约）
 
 mutate4lua 解析 luacov 的**默认 reporter** 输出（即使用 `luacov` 且未配置自定义
-reporter 时产生的格式）。driver 负责生成此精确格式。以下关键特征基于真实
+reporter 时产生的格式）。内建 runner 负责生成此精确格式。以下关键特征基于真实
 luacov 0.17.0 输出验证：
 
 - **段结构**：每个源文件出现在以 78 个 `=` 字符（`^=+$`）组成的分隔行所界定的
@@ -163,25 +166,24 @@ luacov 0.17.0 输出验证：
   `src/foo.lua`）或**绝对路径**（如 `/Users/.../src/foo.lua`）。绝对路径会归一化
   为工作区相对路径以匹配目标。
 
-### 为 Lua 5.4 安装 luacov
+### 为 Lua 5.4 安装 luaunit 与 luacov
 
-driver 需要用 luacov 插桩测试运行以生成 `luacov.report.out`。Lua 5.4（唯一支持
-运行时）的安装方法：
+runner 需要 luaunit 执行测试、luacov 插桩以生成 `luacov.report.out`。Lua 5.4
+（唯一支持运行时）的安装方法：
 
 ```sh
-luarocks --lua-version=5.4 --lua-dir=/opt/homebrew/opt/lua@5.4 install luacov
+luarocks --lua-version=5.4 --lua-dir=/opt/homebrew/opt/lua@5.4 install luaunit luacov
 ```
 
-使 `require("luacov")` 在 `lua5.4` 下生效：
+使 `require("luaunit")` / `require("luacov")` 在 `lua5.4` 下生效：
 
 ```sh
 export LUA_PATH="/Users/$USER/.luarocks/share/lua/5.4/?.lua;$LUA_PATH"
 ```
 
-参考 driver（`lib/mutate4lua/driver/default.lua`）使用
-`luacov.runner.init()` / `luacov.runner.save_stats()` 插桩测试运行，并调用
-`luacov.reporter.report()` 生成报告产物。无法使用 luacov 的宿主应提供
-`--test-command`（该选项禁用覆盖率过滤并给出警告）。
+内建 runner 使用 `luacov.runner.init()` / `luacov.runner.save_stats()` 插桩
+测试运行，并调用 `luacov.reporter.report()` 生成报告产物。不符合测试约定的
+宿主应提供 `--test-command`（该选项禁用覆盖率过滤并给出警告）。
 
 ## Manifest 存储 (Manifest Storage)
 
@@ -205,10 +207,11 @@ export LUA_PATH="/Users/$USER/.luarocks/share/lua/5.4/?.lua;$LUA_PATH"
    存储文件，并追加新计算的 v4 footer。
 2. 从脚本和 CI 中移除以下选项：`--index-suites`、`--lane`、`--runner`、
    `--dry-run`、`--poll-interval`、`--json`、`--migrate-manifest`。
-3. 将所有自定义 driver 更新为上述新契约（不再包含 `--lane`、
-   `--suite-list-file`、`--emit-suite-file-map-json` 或 `--list-suites`）。
-4. 如需覆盖率过滤，确保 luacov 可用；否则使用 `--test-command`（该选项禁用覆盖率
+3. 删除自定义 driver 脚本与 wrapper 中的 `env.default_driver`（ADR-0005）：将
+   测试迁移到内建 runner 约定（`test_*.lua` 返回 luaunit 测试表，位于
+   `spec|test|tests/` 下）；无法迁移的宿主退回 `--test-command`（该选项禁用覆盖率
    过滤并给出警告）。
+4. 安装 luaunit 与 luacov（luarocks，见上文）；否则使用 `--test-command`。
 5. 默认 `--timeout-factor` 已从 `15` 改为 `10`。
 6. 若 `.mutate4lua/manifest/` 目录在更早的检出中存在，将其加入 `.gitignore`；将
    新的 manifest footer 提交到源文件中。
@@ -217,8 +220,8 @@ export LUA_PATH="/Users/$USER/.luarocks/share/lua/5.4/?.lua;$LUA_PATH"
 
 1. vendor `mutate4lua`（submodule 或直接复制），在薄 wrapper 脚本中将其 `lib/`
    加入 `package.path`，并按上文所示调用 `cli.run`。
-2. 提供实现上一节契约的 driver 脚本，以 `env.default_driver` 传入（从
-   `lib/mutate4lua/driver/default.lua` 起步即可）。
+2. 按测试约定组织测试：`test/test_*.lua`，每个文件 `return` 一个 luaunit 测试表；
+   被测模块放在 `lib/`（或 `src/`）下。无需编写任何 runner/driver 脚本。
 3. 通过 wrapper 运行变异，如 `lua tools/mutate.lua src/foo.lua`。manifest 在干净
    运行后自动记录；`lua tools/mutate.lua src/foo.lua --update-manifest` 可显式
    固化一份。
@@ -227,12 +230,14 @@ export LUA_PATH="/Users/$USER/.luarocks/share/lua/5.4/?.lua;$LUA_PATH"
 
 ## 测试 (Tests)
 
-测试套件使用自包含 harness（`spec/harness.lua`），无外部依赖：
+测试套件使用 luaunit，经内建 runner 运行（与宿主同一套约定，dogfood）：
 
 ```sh
-lua spec/run.lua            # 运行全部 spec/*_spec.lua
-lua spec/run.lua spec/cli_spec.lua   # 运行指定文件
+lua spec/run.lua            # 运行全部 spec/test_*.lua
+lua spec/run.lua spec/test_engine.lua   # 运行指定文件
 ```
+
+需先安装 luaunit（scanner 另需 luacheck，见 ADR-0001）。
 
 ## 退出码 (Exit Codes)
 
@@ -244,7 +249,8 @@ lua spec/run.lua spec/cli_spec.lua   # 运行指定文件
 ## 运行需求 (Requirements)
 
 - Lua 5.3+ 或 LuaJIT（内容哈希——文件、scope 及项目哈希——使用原生 64 位位运算符）
-- 如需覆盖率过滤，需 luacov（参考 driver 使用；引擎本身无 luacov 依赖）
+- luaunit（内建 runner 的测试框架，luarocks 提供；引擎本身无 luaunit 依赖）
+- 如需覆盖率过滤，需 luacov（内建 runner 使用；引擎本身无 luacov 依赖）
 - 类 POSIX shell 环境，需有 `find`、`mkdir`、`cp`、`rm`、`sleep` 及 `kill`（并行
   模式使用后台作业与 `wait`）
 - 可选：`timeout` 或 `gtimeout`（用于 mutant 超时）——无此命令时，内置纯 shell
@@ -254,8 +260,9 @@ lua spec/run.lua spec/cli_spec.lua   # 运行指定文件
 
 - manifest 现以 footer 注释形式写入目标文件；外部 `.mutate4lua/manifest/` 存储
   不再使用。
-- CLI 不再支持 `--lane`、`--runner`、`--json` 或 suite 索引；driver 契约缩减为
-  coverage/no-coverage + fail-fast。
+- CLI 不再支持 `--lane`、`--runner`、`--json` 或 suite 索引。
+- driver 契约（`env.default_driver`）已删除（ADR-0005）；测试经内建 luaunit
+  runner 运行，宿主遵循 `test_*.lua` 约定即可。
 - 帮助/错误输出中使用的默认 `command_name` 为 `mutate4lua`。
 
 ---
@@ -297,31 +304,32 @@ manifest 机制：每个目标文件末尾的 footer 注释，内容为 `key=val
 `lua tools/migrate_manifest.lua src/foo.lua`，它会剥离旧 footer、删除对应
 `.mutate4lua/manifest/<relative>.manifest` 外部存储文件，并追加新的 v4 footer。
 之后可删除 `--index-suites`、`--lane`、`--runner`、`--dry-run`、
-`--poll-interval`、`--json`、`--migrate-manifest` 等旧选项；按新的 driver 契约
-更新自定义 driver；注意默认 `--timeout-factor` 已从 15 改为 10；如需覆盖率过滤请
-安装 luacov。
+`--poll-interval`、`--json`、`--migrate-manifest` 等旧选项；删除自定义 driver
+脚本和 wrapper 里的 `env.default_driver`，把测试迁移到内建 runner 约定
+（`test_*.lua` 返回 luaunit 测试表）；注意默认 `--timeout-factor` 已从 15 改为 10；
+安装 luaunit 与 luacov（luarocks）。
 
-driver 契约：未传 `--test-command` 时，引擎通过宿主提供的 driver 脚本运行测试
-（`env.default_driver`）。本库不再提供默认 driver 路径；缺失时报
-`error: driver script required: ...`。driver 需支持：
+内建 runner：未传 `--test-command` 时，引擎调起 `lib/mutate4lua/runner.lua`
+运行测试（ADR-0005）。宿主无需提供脚本，遵循约定即可：测试位于 `spec|test|tests/`
+下、以 `test_*.lua` 命名、返回 luaunit 测试表；被测模块放在 `lib/`（或 `src/`）。
+引擎对 runner 的调用形态：
 
-- 基线（生成覆盖率）：`lua <driver> --coverage-report <abs-path> --quiet`
-- 基线（`--mutate-all` / `--reuse-coverage`）：`lua <driver> --no-coverage --quiet`
-- 变异体运行：`lua <driver> --no-coverage --fail-fast --quiet`
+- 基线（生成覆盖率）：`lua <runner> --coverage-report <abs-path> --quiet`
+- 基线（`--mutate-all` / `--reuse-coverage`）：`lua <runner> --no-coverage --quiet`
+- 变异体运行：`lua <runner> --no-coverage --fail-fast --quiet`
 
-`lib/mutate4lua/driver/default.lua` 可作为宿主 driver 的起点。
-
-在新项目（如 eggy）中接入：vendor 本库 → 写一个调用 `cli.run` 的薄 wrapper 并传入
-`env.default_driver` → 直接运行 `lua tools/mutate.lua src/foo.lua`。无需额外配置；
-manifest 嵌入在源码文件中，建议提交；`.mutate4lua/` 目录加入 `.gitignore`。
+在新项目（如 eggy）中接入：vendor 本库 → 写一个调用 `cli.run` 的薄 wrapper →
+按约定放好 `test/test_*.lua` → 直接运行 `lua tools/mutate.lua src/foo.lua`。无需
+额外配置；manifest 嵌入在源码文件中，建议提交；`.mutate4lua/` 目录加入
+`.gitignore`。
 
 ## 测试
 
-测试使用自研的最小 harness（`spec/harness.lua`），无外部依赖：
+测试使用 luaunit，经内建 runner 运行（与宿主同一约定）：
 
 ```sh
-lua spec/run.lua                       # 运行全部 spec/*_spec.lua
-lua spec/run.lua spec/cli_spec.lua     # 运行指定文件
+lua spec/run.lua                       # 运行全部 spec/test_*.lua
+lua spec/run.lua spec/test_engine.lua  # 运行指定文件
 ```
 
 ## 退出码
@@ -334,6 +342,7 @@ lua spec/run.lua spec/cli_spec.lua     # 运行指定文件
 ## 运行需求
 
 - Lua 5.3+ 或 LuaJIT（哈希运算使用原生 64 位位运算）
-- 如需覆盖率过滤，需安装 luacov（参考 driver 使用；引擎本身不依赖 luacov）
+- luaunit（内建 runner 的测试框架，luarocks 提供）
+- 如需覆盖率过滤，需安装 luacov（内建 runner 使用；引擎本身不依赖 luacov）
 - POSIX 环境（`find`、`mkdir`、`cp`、`rm`、`sleep`、`kill`）
 - 可选 `timeout` / `gtimeout`；否则内置纯 shell 看门狗提供 124 退出码语义

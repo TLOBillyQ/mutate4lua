@@ -77,18 +77,6 @@ function project.project_hash(project_root, target_file, stripped_source)
   return util.fnv1a64(table.concat(parts))
 end
 
--- Host-facing helper: a command that runs the default driver with no coverage.
--- The engine builds its own driver invocations; this is only for hosts that
--- want to reuse the reference driver outside the mutation loop.
-function project.default_test_command(tool_root, _opts)
-  return {
-    "lua",
-    util.join_path(tool_root, "lib", "mutate4lua", "driver", "default.lua"),
-    "--no-coverage",
-    "--quiet",
-  }
-end
-
 function project.discover_test_files(project_root)
   local candidates = {}
   local patterns = {

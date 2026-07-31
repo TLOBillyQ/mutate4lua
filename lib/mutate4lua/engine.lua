@@ -1,6 +1,6 @@
 local scanner = require("mutate4lua.internal.scanner")
 local manifest = require("mutate4lua.internal.manifest")
-local project = require("mutate4lua.driver.project")
+local project = require("mutate4lua.internal.project")
 local parallel = require("mutate4lua.internal.parallel")
 local util = require("mutate4lua.util")
 
@@ -316,8 +316,20 @@ local function _filter_by_changed_scopes(sites, changed_scopes)
   return filtered
 end
 
-local function _build_driver_command(driver_path, coverage_report_path, fail_fast)
-  local parts = {"lua", driver_path}
+-- The engine invokes the pristine runner shipped next to this file, never the
+-- workspace copy: when mutate4lua mutation-tests itself, the workspace copy
+-- may be mutated while the runner (test harness) must stay stable (ADR-0005).
+local _runner_path_cache = nil
+local function _runner_script_path()
+  if _runner_path_cache then return _runner_path_cache end
+  local source = debug.getinfo(_runner_script_path, "S").source:gsub("^@", "")
+  local dir = source:match("^(.*)/[^/]+$") or "."
+  _runner_path_cache = dir .. "/runner.lua"
+  return _runner_path_cache
+end
+
+local function _build_runner_command(coverage_report_path, fail_fast)
+  local parts = {"lua", _runner_script_path()}
   if coverage_report_path then
     parts[#parts + 1] = "--coverage-report"
     parts[#parts + 1] = coverage_report_path
@@ -329,18 +341,6 @@ local function _build_driver_command(driver_path, coverage_report_path, fail_fas
   end
   parts[#parts + 1] = "--quiet"
   return _shell_join(parts)
-end
-
--- Driver-based runs need a driver script; without it the command line would
--- silently degrade. The library ships no default driver path: the host
--- provides one via env.default_driver, or bypasses drivers entirely with
--- --test-command.
-local function _check_driver_options(stderr, options)
-  if not options.driver_script then
-    stderr:write("error: driver script required: pass --test-command or provide a driver script via env.default_driver (see README)\n")
-    return false
-  end
-  return true
 end
 
 local function _scan_target(workspace_root, target)
@@ -564,16 +564,9 @@ function engine.mutate(options, env)
     stderr:write("warning: --test-command disables coverage filtering; treating all sites as covered\n")
     coverage_available = true
   elseif options.mutate_all then
-    if not _check_driver_options(stderr, options) then
-      return 1
-    end
-    local driver_in_ws = util.join_path(workspace_root, options.driver_script)
-    baseline_cmd = _build_driver_command(driver_in_ws, nil, false)
+    baseline_cmd = _build_runner_command(nil, false)
     coverage_available = true
   elseif options.reuse_coverage then
-    if not _check_driver_options(stderr, options) then
-      return 1
-    end
     coverage_lines = _parse_luacov_report(coverage_path, workspace_root, relative)
     if coverage_lines then
       coverage_available = true
@@ -581,14 +574,9 @@ function engine.mutate(options, env)
       stderr:write("warning: --reuse-coverage requested but ", coverage_path, " not found; continuing without coverage filtering\n")
       coverage_available = true
     end
-    local driver_in_ws = util.join_path(workspace_root, options.driver_script)
-    baseline_cmd = _build_driver_command(driver_in_ws, nil, false)
+    baseline_cmd = _build_runner_command(nil, false)
   else
-    if not _check_driver_options(stderr, options) then
-      return 1
-    end
-    local driver_in_ws = util.join_path(workspace_root, options.driver_script)
-    baseline_cmd = _build_driver_command(driver_in_ws, coverage_path, false)
+    baseline_cmd = _build_runner_command(coverage_path, false)
     baseline_uses_coverage = true
   end
 
@@ -660,11 +648,11 @@ function engine.mutate(options, env)
   local timeout = math.max(5, (baseline.elapsed + 1) * timeout_factor)
   stdout:write("baseline: ", tostring(baseline.elapsed), "s (timeout: ", tostring(math.ceil(timeout)), "s)\n")
 
-  local function _mutant_command(ws)
+  local function _mutant_command()
     if options.test_command then
       return options.test_command
     end
-    return _build_driver_command(util.join_path(ws, options.driver_script), nil, true)
+    return _build_runner_command(nil, true)
   end
 
   local worker_count = _resolve_worker_count(options, #sites)
@@ -694,8 +682,8 @@ function engine.mutate(options, env)
         prepare = function(i, ws)
           util.write_file(util.join_path(ws, relative), scanner.apply_mutation(stripped, sites[i]))
         end,
-        command = function(_, ws)
-          return _mutant_command(ws)
+        command = function(_, _)
+          return _mutant_command()
         end,
         on_complete = function(i, run_result)
           completed = completed + 1
@@ -724,7 +712,7 @@ function engine.mutate(options, env)
     end
   else
     local target_in_ws = util.join_path(workspace, relative)
-    local mutant_cmd = _mutant_command(workspace)
+    local mutant_cmd = _mutant_command()
     for i, site in ipairs(sites) do
       util.write_file(target_in_ws, scanner.apply_mutation(stripped, site))
       local result = run_shell(mutant_cmd, workspace, timeout)
