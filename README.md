@@ -1,90 +1,75 @@
 # mutate4lua
 
-`mutate4lua` is a pure-Lua, host-agnostic mutation-testing library for Lua
-projects. The implementation lives under `lib/mutate4lua/`; a host project
-vendors it and exposes a CLI through `require("mutate4lua.cli").run(args, env)`.
+`mutate4lua` 是一个纯 Lua、与宿主无关的变异测试库，适用于 Lua 项目。实现代码位于
+`lib/mutate4lua/` 目录下；宿主项目将其 vendor 进来，通过
+`require("mutate4lua.cli").run(args, env)` 暴露 CLI。
 
-## Upstream Alignment (对齐上游)
+## 上游对齐 (Upstream Alignment)
 
-`mutate4lua` follows the "Lua faithful implementation of the upstream spec"
-doctrine, with [mutate4java's spec.md](https://github.com/unclebob/mutate4java)
-as the reference (the most mature of the three upstream versions): the CLI
-surface, option defaults, selection semantics, report skeleton, and exit codes
-converge to it with **zero local-only inventions**. Cross-repo decisions live
-as ADRs in the luatools notes repo (`projects/luatools/docs/adr/`).
+`mutate4lua` 遵循"Lua 忠实实现上游规格"的总纲，以
+[mutate4java 的 spec.md](https://github.com/unclebob/mutate4java) 为参照（上游三版中
+最成熟者）：CLI 表面、选项默认值、位点选择语义、报告骨架及退出码均向其收敛，**零本地
+独有发明**。跨仓库决策以 ADR 形式记录于 luatools notes 仓库
+（`projects/luatools/docs/adr/`）。
 
-**Aligned invariants (对齐不变量)**
+**对齐不变量 (Aligned Invariants)**
 
-- Exit codes `0` success / `1` usage / `2` baseline failed / `3` survived
-  (the java convention — clj/go only had 0/1).
-- Manifest embedded as a `--[[ ]]` footer comment in the target file
-  (ADR-0002; the external `.mutate4lua/manifest/` store is abolished, with a
-  one-off migration script for existing stores).
-- Differential selection: no manifest → all covered sites; unchanged module
-  hash → 0 sites; changed hash → changed scopes only. Manifest is written
-  only after a clean run (no survivors, or nothing to execute) — the local
-  "auto-record at 90% kill score" rule is abolished (ADR-0004).
-- Option surface = upstream set: `--scan`, `--update-manifest`, `--lines`,
-  `--since-last-run`, `--mutate-all`, `--mutation-warning` (50),
-  `--max-workers` (cores/2), `--timeout-factor` (**10**, not the old local 15),
-  `--test-command`, `--reuse-coverage`, `--verbose`. Removed local-only
-  options: `--index-suites`, `--lane`, `--runner`, `--dry-run`,
-  `--poll-interval`, `--json` (ADR-0004; `--migrate-manifest` becomes a
-  one-off migration script, not a CLI flag).
-- Mutation set: boolean flip, comparison/arithmetic operator swaps,
-  `and` ↔ `or`, unary `not`/`-` removal, `0` ↔ `1`, rvalue → `nil`
-  (the Lua counterpart of java's rvalue → `null`).
-- Scope identity is declaration-based, not line-based (java spec §7.3).
-- Worker copies of the module; originals are never mutated in place; a
-  timed-out mutant counts as killed.
+- 退出码 `0` 成功 / `1` 用法错误 / `2` baseline 失败 / `3` 存在存活 mutant
+  （java 约定——clj/go 版仅有 0/1）。
+- manifest 以 `--[[ ]]` footer 注释形式嵌入目标文件尾部（ADR-0002；外部
+  `.mutate4lua/manifest/` 存储已废除，提供一次性迁移脚本处理现有存储）。
+- 差异化选择：无 manifest → 所有已覆盖位点；模块 hash 未变 → 0 个位点；hash 变化 →
+  仅变动的 scope。manifest 仅在干净运行后写入（无 survivor，或无 mutant 需执行）——
+  本地"90% 击杀率自动记录"规则已废除（ADR-0004）。
+- 选项表面 = 上游集合：`--scan`、`--update-manifest`、`--lines`、
+  `--since-last-run`、`--mutate-all`、`--mutation-warning`（50）、
+  `--max-workers`（cores/2）、`--timeout-factor`（**10**，非旧版本地值 15）、
+  `--test-command`、`--reuse-coverage`、`--verbose`。已删除的本地独有选项：
+  `--index-suites`、`--lane`、`--runner`、`--dry-run`、`--poll-interval`、
+  `--json`（ADR-0004；`--migrate-manifest` 改为一次性迁移脚本，非 CLI 标志）。
+- 变异集合：布尔翻转、比较/算术运算符交换、`and` ↔ `or`、一元 `not`/`-` 移除、
+  `0` ↔ `1`、右值 → `nil`（java 版右值 → `null` 的 Lua 对应）。
+- scope 身份以声明为基准，非行号为基准（java 规格 §7.3）。
+- worker 操作模块副本；原始文件永不在原地变异；超时的 mutant 视为已击杀。
 
-**Deliberate deviations (有意偏离)**
+**有意偏离 (Deliberate Deviations)**
 
-- Host-provided driver script instead of a built-in build-tool invocation
-  (maven / `go test`) — Lua has no standard build or test runner; the driver
-  contract is the Lua counterpart (suites/lane parameters removed, ADR-0004).
-- Coverage source is **luacov** artifacts only (ADR-0003) — the Lua
-  counterpart of JaCoCo/coverprofile; driver-produced ad-hoc coverage formats
-  are not accepted.
-- Scope semantic hash = FNV-1a over the normalized AST serialization
-  (format-insensitive, clj `pr-str` semantics upgraded to AST; the three
-  upstreams disagree — clj format-insensitive / go whitespace-normalized /
-  java raw-substring — so this picks the semantics that fits the AST
-  migration, ADR-0001/0004).
+- 宿主提供的 driver 脚本，而非内置构建工具调用（maven / `go test`）——Lua 无标准
+  构建或测试运行器；driver 契约为 Lua 对应方案（suites/lane 参数已移除，
+  ADR-0004）。
+- 覆盖率来源仅限于 **luacov** 产物（ADR-0003）——JaCoCo/coverprofile 的 Lua
+  对应方案；不接受 driver 生成的临时覆盖率格式。
+- scope 语义 hash = 对归一化 AST 序列化结果取 FNV-1a（格式无关，clj 的 `pr-str`
+  语义升级为 AST；上游三版不一——clj 格式无关 / go 空白归一化 / java 原始子串——
+  因此选择符合 AST 迁移的语义，ADR-0001/0004）。
 
-**Breaking changes on this branch**: suites/`--lane`, `--json`, the external
-manifest store, the 90% auto-record rule, and ad-hoc driver coverage are all
-removed. See "Migrating" for the upgrade path.
+**本分支的破坏性变更**：suites/`--lane`、`--json`、外部 manifest 存储、90% 自动
+记录规则及临时 driver 覆盖率均已移除。升级路径见"迁移"一节。
 
-## Features
+## 功能 (Features)
 
-- Accepts one Lua source file target.
-- Discovers mutation sites with a luacheck AST-based scanner.
-- Tracks declaration scopes for differential mutation: by default only scopes
-  whose semantic hash changed since the recorded manifest are re-tested;
-  `--mutate-all` forces every covered site.
-- Stores the manifest as an embedded `--[[ mutate4lua-manifest ... ]]`
-  footer comment at the end of the target source file.
-- Writes the manifest only after a fully clean run (all executed mutants
-  killed, or no mutants needed execution) and never after a survivor or a
-  baseline failure; `--lines` suppresses the write because it records partial
-  state.
-- Runs tests in isolated workspace copies, in parallel across workers
-  (default: half the CPU cores; `--max-workers 1` for serial).
-- Uses line coverage from a standard `luacov.report.out` to skip uncovered
-  sites; `--reuse-coverage` skips regeneration, and `--test-command` disables
-  coverage filtering with a warning.
-- Reports killed, survived, and timed-out mutants in text.
+- 接受单个 Lua 源文件作为目标。
+- 使用 luacheck AST 扫描器发现变异位点。
+- 按声明 scope 追踪差异化变异：默认情况下，仅重测自记录 manifest 以来 semantic
+  hash 发生变化的 scope；`--mutate-all` 强制执行所有已覆盖位点。
+- 将 manifest 存储为目标源文件末尾的嵌入式 `--[[ mutate4lua-manifest ... ]]`
+  footer 注释。
+- 仅在完全干净运行后写入 manifest（所有已执行 mutant 均被击杀，或无 mutant 需
+  执行），存在 survivor 或 baseline 失败后绝不写入；`--lines` 抑制写入，因其记录的
+  是部分状态。
+- 在隔离的工作区副本中运行测试，跨 worker 并行执行（默认：CPU 核数的一半；
+  `--max-workers 1` 为串行）。
+- 使用标准 `luacov.report.out` 中的行覆盖率跳过未覆盖位点；`--reuse-coverage`
+  跳过重新生成，使用 `--test-command` 则禁用覆盖率过滤并给出警告。
+- 以文本形式报告已击杀、存活及超时的 mutant。
 
-The mutation set includes boolean literals (`true` ↔ `false`), comparison and
-arithmetic operators, boolean operators (`and` ↔ `or`), unary `not` and unary
-minus removal, the integer constants `0` ↔ `1`, string literals (→ `nil`),
-and function-call expressions (→ `nil`).
+变异集合包括布尔字面量（`true` ↔ `false`）、比较运算符与算术运算符、布尔运算符
+（`and` ↔ `or`）、一元 `not` 与一元负号移除、整型常量 `0` ↔ `1`、字符串字面量
+（→ `nil`）以及函数调用表达式（→ `nil`）。
 
 ## CLI
 
-The package exposes Lua modules only. It does not ship a standalone `bin/`
-entrypoint; a host wires it up with a thin wrapper:
+本包仅暴露 Lua 模块。不提供独立的 `bin/` 入口点；宿主通过薄 wrapper 接入：
 
 ```lua
 package.path = "vendor/mutate4lua/lib/?.lua;vendor/mutate4lua/lib/?/init.lua;" .. package.path
@@ -95,7 +80,7 @@ os.exit(require("mutate4lua.cli").run(arg, {
 }))
 ```
 
-Typical usage through such a wrapper:
+通过此类 wrapper 的典型用法：
 
 ```sh
 lua tools/mutate.lua --help
@@ -109,188 +94,169 @@ lua tools/mutate.lua src/demo/flag.lua --reuse-coverage
 lua tools/mutate.lua src/demo/flag.lua --test-command "busted"
 ```
 
-Subcommands and options (mirrors `--help`):
+子命令与选项（对应 `--help` 输出）：
 
-| Flag | Meaning |
+| Flag | 含义 |
 | --- | --- |
-| *(default)* | run mutation tests |
-| `--scan` | list mutation sites without running tests |
-| `--update-manifest` | write/refresh the embedded manifest footer without mutating |
-| `--mutate-all` | mutate every covered site, ignoring the manifest |
-| `--since-last-run` | restrict mutation to scopes that differ from the manifest |
-| `--lines N,N` | restrict to the given line numbers (suppresses manifest writes) |
-| `--reuse-coverage` | reuse the existing `luacov.report.out` instead of regenerating it |
-| `--max-workers N` | parallel workers (default: half the CPU cores; `1` = serial) |
-| `--timeout-factor N` | mutant timeout multiplier over the baseline (default `10`) |
-| `--test-command CMD` | custom test command, bypassing the driver contract |
-| `--mutation-warning N` | warn when the selected site count exceeds N (default `50`) |
-| `--verbose` | verbose output |
-| `-h, --help` | show help |
+| *(default)* | 运行变异测试 |
+| `--scan` | 列出变异位点，不运行测试 |
+| `--update-manifest` | 写入/刷新嵌入式 manifest footer，不执行变异 |
+| `--mutate-all` | 变异所有已覆盖位点，忽略 manifest |
+| `--since-last-run` | 仅变异与 manifest 不同的 scope |
+| `--lines N,N` | 限定指定行号（抑制 manifest 写入） |
+| `--reuse-coverage` | 复用已有的 `luacov.report.out`，不重新生成 |
+| `--max-workers N` | 并行 worker 数（默认：CPU 核数的一半；`1` = 串行） |
+| `--timeout-factor N` | mutant 超时倍数，基于 baseline 时长（默认 `10`） |
+| `--test-command CMD` | 自定义测试命令，绕过 driver 契约 |
+| `--mutation-warning N` | 当选定位点数超过 N 时警告（默认 `50`） |
+| `--verbose` | 详细输出 |
+| `-h, --help` | 显示帮助 |
 
-## Driver contract
+## Driver 契约 (Driver Contract)
 
-When `--test-command` is not provided, the engine drives tests through a
-host-provided driver script passed as `env.default_driver`. The library ships
-**no default driver path** — when no driver is available it fails fast with
-`error: driver script required: pass --test-command or provide a driver script via env.default_driver (see README)`.
+未提供 `--test-command` 时，引擎通过宿主提供的 driver 脚本（以
+`env.default_driver` 传入）驱动测试。本库**不提供默认 driver 路径**——无可用
+driver 时立即失败，报错
+`error: driver script required: pass --test-command or provide a driver script via env.default_driver (see README)`。
 
-A driver script is invoked by the engine as follows:
+引擎按以下方式调用 driver 脚本：
 
-- Baseline run (coverage generation):
+- baseline 运行（生成覆盖率）：
   `lua <driver> --coverage-report <abs-path> --quiet`
-- Baseline run (`--mutate-all` or `--reuse-coverage`):
+- baseline 运行（`--mutate-all` 或 `--reuse-coverage`）：
   `lua <driver> --no-coverage --quiet`
-- Mutant run:
+- mutant 运行：
   `lua <driver> --no-coverage --fail-fast --quiet`
 
-Exit `0` means the tests pass (a mutant survives); non-zero means failure
-(a mutant is killed). The engine applies its own timeout around the run.
+退出 `0` 表示测试通过（mutant 存活）；非零表示失败（mutant 被击杀）。引擎对运行
+施加自身的超时控制。
 
-The driver must produce a standard `luacov.report.out` at the absolute path
-given to `--coverage-report`. The engine parses that report itself; no
-library dependency on luacov is required. When luacov is not installed on the
-host, `--coverage-report` should fail with a clear message; `--no-coverage`
-runs must still work.
+driver 必须在 `--coverage-report` 给定的绝对路径上产出标准
+`luacov.report.out`。引擎自行解析该报告，无需依赖 luacov 库。当宿主机未安装
+luacov 时，`--coverage-report` 应失败并给出明确提示；`--no-coverage` 运行仍须
+正常工作。
 
-`lib/mutate4lua/driver/default.lua` is a working starting point for a host
-driver.
+`lib/mutate4lua/driver/default.lua` 可作为宿主 driver 的可用起点。
 
-### Real luacov output format (parser contract)
+### 真实 luacov 输出格式（解析器契约）
 
-mutate4lua parses the **default reporter** output of luacov (the format produced
-by `luacov` with no custom reporter configured). The driver is responsible for
-producing this exact format. Key characteristics verified against real
-luacov 0.17.0 output:
+mutate4lua 解析 luacov 的**默认 reporter** 输出（即使用 `luacov` 且未配置自定义
+reporter 时产生的格式）。driver 负责生成此精确格式。以下关键特征基于真实
+luacov 0.17.0 输出验证：
 
-- **Section structure**: each source file appears in its own block delimited by
-  separator lines of 78 `=` characters (`^=+$`).
+- **段结构**：每个源文件出现在以 78 个 `=` 字符（`^=+$`）组成的分隔行所界定的
+  独立块中。
   ```
   ==============================================================================
-  <path as luacov saw it>
+  <luacov 所见的路径>
   ==============================================================================
   ```
-- **Hit-count column**: right-aligned; width grows with the largest hit count
-  (minimum 2 characters for `*0` to fit). The column is followed by one
-  separator space, then the source line **verbatim** (including its original
-  indentation).
-- **Missed executable lines**: displayed as `*0` (single asterisk) at the count
-  column position — no leading spaces. Example: `*0     return 0`.
-- **Non-executable lines** (blank lines, `end`, `else`, comments): NO count
-  prefix — the count column is empty (padding spaces), then the separator space,
-  then the source line. These lines advance the line counter but are NOT
-  recorded as executable.
-- **Summary section**: always the last block in the report, headed by
-  `Summary` as the "path" name. The parser stops when it encounters `Summary`
-  so the coverage table below it is not consumed.
-- **Path shapes**: luacov records paths as seen at `require()` time — they may
-  be **relative** (e.g. `src/foo.lua`) or **absolute** (e.g.
-  `/Users/.../src/foo.lua`). Absolute paths are normalized to
-  workspace-root-relative for target matching.
+- **命中次数列**：右对齐；宽度随最大命中次数增长（最小 2 字符以容纳 `*0`）。
+  该列后跟一个分隔空格，然后是**逐字**的源码行（含原始缩进）。
+- **未命中可执行行**：在次数列位置显示 `*0`（单星号）——无前导空格。示例：
+  `*0     return 0`。
+- **非可执行行**（空行、`end`、`else`、注释）：无计数前缀——次数列为空（填充
+  空格），然后是分隔空格，再是源码行。这些行进号累加但不记录为可执行行。
+- **摘要段**：始终为报告的最后一块，以 `Summary` 作为"路径"名。解析器遇到
+  `Summary` 即停止，其下的覆盖率表不再消费。
+- **路径形态**：luacov 按 `require()` 时的所见记录路径——可能是**相对路径**（如
+  `src/foo.lua`）或**绝对路径**（如 `/Users/.../src/foo.lua`）。绝对路径会归一化
+  为工作区相对路径以匹配目标。
 
-### Installing luacov for Lua 5.4
+### 为 Lua 5.4 安装 luacov
 
-The driver must instrument the test run with luacov to produce
-`luacov.report.out`. Install method for Lua 5.4 (the only supported runtime):
+driver 需要用 luacov 插桩测试运行以生成 `luacov.report.out`。Lua 5.4（唯一支持
+运行时）的安装方法：
 
 ```sh
 luarocks --lua-version=5.4 --lua-dir=/opt/homebrew/opt/lua@5.4 install luacov
 ```
 
-To make `require("luacov")` work under `lua5.4`:
+使 `require("luacov")` 在 `lua5.4` 下生效：
 
 ```sh
 export LUA_PATH="/Users/$USER/.luarocks/share/lua/5.4/?.lua;$LUA_PATH"
 ```
 
-The reference driver (`lib/mutate4lua/driver/default.lua`) uses
-`luacov.runner.init()` / `luacov.runner.save_stats()` to instrument the test
-run and invokes `luacov.reporter.report()` to generate the report artifact.
-Hosts that cannot use luacov should provide `--test-command` (which disables
-coverage filtering with a warning).
+参考 driver（`lib/mutate4lua/driver/default.lua`）使用
+`luacov.runner.init()` / `luacov.runner.save_stats()` 插桩测试运行，并调用
+`luacov.reporter.report()` 生成报告产物。无法使用 luacov 的宿主应提供
+`--test-command`（该选项禁用覆盖率过滤并给出警告）。
 
-## Manifest storage
+## Manifest 存储 (Manifest Storage)
 
-- The manifest is stored as an embedded `--[[ mutate4lua-manifest ... ]]`
-  footer comment at the end of the target source file.
-- It records manifest version `4`, the module hash, and for each scope:
-  `id`, `kind`, `startLine`, `endLine`, `semanticHash`.
-- Legacy `lastMutation*` fields are ignored on read and never written.
-- Differential mode skips scopes whose `semanticHash` is unchanged.
-- The manifest is written after a clean run (no survivors / no executed
-  mutants) and on `--update-manifest`. It is never written after a baseline
-  failure, after any survivor, or during `--scan`. `--lines` suppresses it.
-- The pre-alignment external store `.mutate4lua/manifest/` is no longer read
-  or written. Use `tools/migrate_manifest.lua` once per target to move from
-  the old store/legacy footer to a fresh v4 footer:
-  `lua tools/migrate_manifest.lua src/foo.lua`.
+- manifest 以嵌入式 `--[[ mutate4lua-manifest ... ]]` footer 注释形式存储在目标
+  源文件末尾。
+- 记录 manifest 版本 `4`、模块 hash，以及每个 scope 的：`id`、`kind`、
+  `startLine`、`endLine`、`semanticHash`。
+- 旧的 `lastMutation*` 字段读取时忽略，写入时不再生成。
+- 差异化模式跳过 `semanticHash` 未变的 scope。
+- manifest 在干净运行（无 survivor / 无 mutant 需执行）后及 `--update-manifest`
+  时写入。baseline 失败后、存在任何 survivor 后或 `--scan` 时绝不写入。`--lines`
+  抑制写入。
+- 对齐前的外部存储 `.mutate4lua/manifest/` 不再读取或写入。对每个目标文件执行
+  一次 `tools/migrate_manifest.lua`，从旧存储/旧 footer 迁移到新的 v4 footer：
+  `lua tools/migrate_manifest.lua src/foo.lua`。
 
-## Migrating from the pre-alignment version
+## 从对齐前版本迁移 (Migrating)
 
-1. Run `lua tools/migrate_manifest.lua <target.lua>` once per mutated file.
-   It strips any legacy footer, deletes the corresponding
-   `.mutate4lua/manifest/<relative>.manifest` store file, and appends a
-   freshly computed v4 footer.
-2. Remove the following options from scripts and CI: `--index-suites`,
-   `--lane`, `--runner`, `--dry-run`, `--poll-interval`, `--json`,
-   `--migrate-manifest`.
-3. Update any custom driver to the new contract above (no `--lane`,
-   `--suite-list-file`, `--emit-suite-file-map-json`, or `--list-suites`).
-4. Ensure luacov is available if you rely on coverage filtering; otherwise
-   use `--test-command` (which disables coverage filtering with a warning).
-5. The default `--timeout-factor` changed from `15` to `10`.
-6. Add `.mutate4lua/manifest/` to `.gitignore` if it still exists from an
-   earlier checkout; commit the new manifest footers inside your source files.
+1. 对每个被变异文件执行一次 `lua tools/migrate_manifest.lua <target.lua>`。该脚本
+   会剥离所有旧 footer、删除对应的 `.mutate4lua/manifest/<relative>.manifest`
+   存储文件，并追加新计算的 v4 footer。
+2. 从脚本和 CI 中移除以下选项：`--index-suites`、`--lane`、`--runner`、
+   `--dry-run`、`--poll-interval`、`--json`、`--migrate-manifest`。
+3. 将所有自定义 driver 更新为上述新契约（不再包含 `--lane`、
+   `--suite-list-file`、`--emit-suite-file-map-json` 或 `--list-suites`）。
+4. 如需覆盖率过滤，确保 luacov 可用；否则使用 `--test-command`（该选项禁用覆盖率
+   过滤并给出警告）。
+5. 默认 `--timeout-factor` 已从 `15` 改为 `10`。
+6. 若 `.mutate4lua/manifest/` 目录在更早的检出中存在，将其加入 `.gitignore`；将
+   新的 manifest footer 提交到源文件中。
 
-## Integrating into a new project (example: eggy)
+## 接入新项目（示例：eggy）(Integrating)
 
-1. Vendor `mutate4lua` (submodule or copy) and add its `lib/` to `package.path`
-   in a thin wrapper script that calls `cli.run` as shown above.
-2. Provide a driver script implementing the contract in the previous section
-   and pass it as `env.default_driver` (starting from
-   `lib/mutate4lua/driver/default.lua` is fine).
-3. Run mutations through the wrapper, e.g. `lua tools/mutate.lua src/foo.lua`.
-   The manifest records automatically after a clean run;
-   `lua tools/mutate.lua src/foo.lua --update-manifest` pins one explicitly.
-4. Add `.mutate4lua/` to `.gitignore` (cache and any stale store files); the
-   manifest lives inside the target source file and should be committed.
+1. vendor `mutate4lua`（submodule 或直接复制），在薄 wrapper 脚本中将其 `lib/`
+   加入 `package.path`，并按上文所示调用 `cli.run`。
+2. 提供实现上一节契约的 driver 脚本，以 `env.default_driver` 传入（从
+   `lib/mutate4lua/driver/default.lua` 起步即可）。
+3. 通过 wrapper 运行变异，如 `lua tools/mutate.lua src/foo.lua`。manifest 在干净
+   运行后自动记录；`lua tools/mutate.lua src/foo.lua --update-manifest` 可显式
+   固化一份。
+4. 将 `.mutate4lua/` 加入 `.gitignore`（缓存及任何残留存储文件）；manifest 位于
+   目标源文件内，应一并提交。
 
-## Tests
+## 测试 (Tests)
 
-The test suite uses a self-contained harness (`spec/harness.lua`) with no
-external dependencies:
+测试套件使用自包含 harness（`spec/harness.lua`），无外部依赖：
 
 ```sh
-lua spec/run.lua            # run all spec/*_spec.lua
-lua spec/run.lua spec/cli_spec.lua   # run specific files
+lua spec/run.lua            # 运行全部 spec/*_spec.lua
+lua spec/run.lua spec/cli_spec.lua   # 运行指定文件
 ```
 
-## Exit Codes
+## 退出码 (Exit Codes)
 
-- `0`: success, no surviving mutants, no mutants needed execution, scan
-  succeeded, or manifest update succeeded
-- `1`: command-line usage or infrastructure error
-- `2`: baseline test failure
-- `3`: at least one mutant survived
+- `0`：成功，无存活 mutant，无 mutant 需执行，扫描成功，或 manifest 更新成功
+- `1`：命令行用法错误或基础设施错误
+- `2`：baseline 测试失败
+- `3`：至少一个 mutant 存活
 
-## Requirements
+## 运行需求 (Requirements)
 
-- Lua 5.3+ or LuaJIT (content hashing — file, scope, and project hashes —
-  uses native 64-bit bitwise operators)
-- luacov if you want coverage filtering (the reference driver uses it; the
-  engine itself has no luacov dependency)
-- a POSIX-ish shell environment with `find`, `mkdir`, `cp`, `rm`, `sleep`,
-  and `kill` (parallel mode uses background jobs and `wait`)
-- optional: `timeout` or `gtimeout` for mutant timeouts — without one, a
-  pure-shell watchdog provides the same 124-exit-code semantics
+- Lua 5.3+ 或 LuaJIT（内容哈希——文件、scope 及项目哈希——使用原生 64 位位运算符）
+- 如需覆盖率过滤，需 luacov（参考 driver 使用；引擎本身无 luacov 依赖）
+- 类 POSIX shell 环境，需有 `find`、`mkdir`、`cp`、`rm`、`sleep` 及 `kill`（并行
+  模式使用后台作业与 `wait`）
+- 可选：`timeout` 或 `gtimeout`（用于 mutant 超时）——无此命令时，内置纯 shell
+  看门狗提供相同的 124 退出码语义
 
-## Compatibility Notes
+## 兼容性说明 (Compatibility Notes)
 
-- Manifests are now written as footer comments into target files; the
-  external `.mutate4lua/manifest/` store is no longer used.
-- The CLI no longer supports `--lane`, `--runner`, `--json`, or suite
-  indexing; the driver contract is reduced to coverage/no-coverage +
-  fail-fast.
-- The default `command_name` used in help/error output is `mutate4lua`.
+- manifest 现以 footer 注释形式写入目标文件；外部 `.mutate4lua/manifest/` 存储
+  不再使用。
+- CLI 不再支持 `--lane`、`--runner`、`--json` 或 suite 索引；driver 契约缩减为
+  coverage/no-coverage + fail-fast。
+- 帮助/错误输出中使用的默认 `command_name` 为 `mutate4lua`。
 
 ---
 
@@ -299,11 +265,11 @@ lua spec/run.lua spec/cli_spec.lua   # run specific files
 `mutate4lua` 是纯 Lua、与宿主无关的变异测试库，代码位于 `lib/mutate4lua/`。
 宿主项目 vendor 本库后，通过 `require("mutate4lua.cli").run(args, env)` 暴露 CLI。
 
-它支持扫描变异点、按 manifest 做差异化变异（默认只重测 semantic hash 变化过的
+它支持扫描变异位点、按 manifest 做差异化变异（默认只重测 semantic hash 变化过的
 scope，`--mutate-all` 强制执行全部已覆盖位点）、在隔离工作区并行执行测试（默认
 worker 数为 CPU 核数的一半，`--max-workers 1` 串行）、按 luacov 报告过滤未覆盖位点，
 并输出文本报告。manifest 以 `--[[ mutate4lua-manifest ... ]]` footer 注释形式嵌入
-目标源码末尾，随源码一起提交。
+目标源文件末尾，随源码一起提交。
 
 常用命令（经宿主 wrapper）：
 
@@ -318,7 +284,7 @@ lua tools/mutate.lua src/demo/flag.lua --update-manifest
 lua tools/mutate.lua src/demo/flag.lua --reuse-coverage
 ```
 
-完整选项列表见 `--help` 或上文英文 CLI 一节。
+完整选项列表见 `--help` 或上文 CLI 一节。
 
 manifest 机制：每个目标文件末尾的 footer 注释，内容为 `key=value` 正文：
 `version`（当前为 4）与 `projectHash` 头，加上每个 scope 的 `id` / `kind` /
