@@ -7,6 +7,9 @@ local util = require("mutate4lua.util")
 local engine = {}
 
 local TIMEOUT_EXIT_CODE = 124
+-- Manifest format version (bumped when scope-hash semantics change, e.g. the
+-- v3→v4 switch from lexer-based to normalized-AST hashing, ADR-0001/0004).
+local CURRENT_MANIFEST_VERSION = 4
 
 local function _parse_exit_code(ok, kind, code)
   if type(ok) == "number" then
@@ -267,6 +270,21 @@ local function _scope_manifest_map(old_manifest)
   return old_scopes
 end
 
+-- A manifest from an older format (version < CURRENT_MANIFEST_VERSION) is
+-- invalid: its scope hashes were computed with different semantics (v3 used
+-- the pre-AST lexer-based hash), so trusting it would skip rescanning scopes
+-- whose hashes merely happened to differ from the new algorithm.  Treat it as
+-- absent, forcing a full rescan (the "old footer → full rescan" guarantee).
+local function _valid_manifest(old_manifest)
+  if old_manifest == nil then
+    return nil
+  end
+  if old_manifest.version == nil or old_manifest.version < CURRENT_MANIFEST_VERSION then
+    return nil
+  end
+  return old_manifest
+end
+
 local function _changed_scope_lookup(scopes, old_manifest)
   if not old_manifest then
     local changed_scopes = {}
@@ -456,7 +474,7 @@ function engine.scan(options, env)
     data.sites = _filter_by_lines(data.sites, options.line_set)
   end
 
-  local old_manifest = manifest.read(data.file)
+  local old_manifest = _valid_manifest(manifest.read(data.file))
   local changed_scopes = _changed_scope_lookup(data.scopes, old_manifest)
 
   stdout:write("file: ", data.relative_file, "\n")
@@ -502,7 +520,7 @@ function engine.mutate(options, env)
   local sites = data.sites
   local scopes = data.scopes
   local project_root = project.find_root(workspace_root, abs_target)
-  local old_manifest = manifest.read(abs_target)
+  local old_manifest = _valid_manifest(manifest.read(abs_target))
   local proj_hash = project.project_hash(project_root, abs_target, stripped)
   local module_hash_changed = old_manifest == nil or old_manifest.project_hash ~= proj_hash
   local changed_scopes = _changed_scope_lookup(scopes, old_manifest)

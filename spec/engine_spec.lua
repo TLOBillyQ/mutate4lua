@@ -225,6 +225,24 @@ describe("engine.mutate differential selection", function()
     assert.are.equal(2, shell.count())
   end)
 
+  it("treats a stale v3 manifest as invalid and rescans all sites", function()
+    write_file(target_abs, "return 1 == 2\n")
+    engine.update_manifest({target = target_rel}, {cwd = dir, stdout = null_buffer(), stderr = null_buffer()})
+    -- downgrade the freshly-written footer's format version (4 -> 3), the
+    -- pre-AST-hash format: it must NOT be trusted, even though its hashes
+    -- were computed by the current algorithm and would otherwise compare equal.
+    local content = assert(read_file(target_abs))
+    local stripped = manifest.strip(content)
+    local footer = content:sub(#stripped + 1):gsub("version=4", "version=3")
+    write_file(target_abs, stripped .. footer)
+    local shell = make_shell({{ok = true}, {ok = false}, {ok = false}})
+    local env = {cwd = dir, run_shell = shell.fn, stdout = null_buffer(), stderr = null_buffer()}
+    engine.mutate({target = target_rel, test_command = "true", max_workers = 1}, env)
+    -- a trusted v3 footer would suppress differential selection (0 runs);
+    -- invalidation forces baseline + both mutants (3 runs)
+    assert.are.equal(3, shell.count())
+  end)
+
   it("--mutate-all bypasses the manifest filter", function()
     write_file(target_abs, "return 1 == 2\n")
     engine.update_manifest({target = target_rel}, {cwd = dir, stdout = null_buffer(), stderr = null_buffer()})
