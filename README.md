@@ -233,8 +233,8 @@ export LUA_PATH="/Users/$USER/.luarocks/share/lua/5.4/?.lua;$LUA_PATH"
 测试套件使用 luaunit，经内建 runner 运行（与宿主同一套约定，dogfood）：
 
 ```sh
-lua spec/run.lua            # 运行全部 spec/test_*.lua
-lua spec/run.lua spec/test_engine.lua   # 运行指定文件
+lua tests/run.lua            # 运行全部 tests/test_*.lua
+lua tests/run.lua tests/test_engine.lua   # 运行指定文件
 ```
 
 需先安装 luaunit（scanner 另需 luacheck，见 ADR-0001）。
@@ -328,8 +328,8 @@ manifest 机制：每个目标文件末尾的 footer 注释，内容为 `key=val
 测试使用 luaunit，经内建 runner 运行（与宿主同一约定）：
 
 ```sh
-lua spec/run.lua                       # 运行全部 spec/test_*.lua
-lua spec/run.lua spec/test_engine.lua  # 运行指定文件
+lua tests/run.lua                       # 运行全部 tests/test_*.lua
+lua tests/run.lua tests/test_engine.lua  # 运行指定文件
 ```
 
 ## 退出码

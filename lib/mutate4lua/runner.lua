@@ -52,7 +52,7 @@ local function parse_args(argv)
     error("--coverage-report and --no-coverage are mutually exclusive")
   end
   if not args.coverage_report and not args.no_coverage then
-    -- Direct human invocations (e.g. lua spec/run.lua) default to no coverage;
+    -- Direct human invocations (e.g. lua tests/run.lua) default to no coverage;
     -- the engine always passes one of the two flags explicitly.
     args.no_coverage = true
   end
