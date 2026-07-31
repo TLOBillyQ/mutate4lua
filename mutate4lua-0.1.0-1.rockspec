@@ -3,7 +3,7 @@ package = "mutate4lua"
 version = "0.1.0-1"
 source = {
    url = "git+http://lzxsvn:3000/qinyuanj/mutate4lua.git",
-   branch = "main",
+   tag = "v0.1.0",
 }
 description = {
    summary = "Mutation testing library for Lua",
@@ -18,9 +18,9 @@ description = {
 }
 dependencies = {
    "lua >= 5.4",
-   "luacheck >= 1.1.0",
-   "luacov >= 0.17.0",
-   "luaunit >= 3.4",
+   "luacheck == 1.2.0-1",
+   "luacov == 0.17.0-1",
+   "luaunit == 3.5-1",
 }
 build = {
    type = "builtin",
