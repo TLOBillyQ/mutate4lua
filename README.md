@@ -4,6 +4,58 @@
 projects. The implementation lives under `lib/mutate4lua/`; a host project
 vendors it and exposes a CLI through `require("mutate4lua.cli").run(args, env)`.
 
+## Upstream Alignment (对齐上游)
+
+`mutate4lua` follows the "Lua faithful implementation of the upstream spec"
+doctrine, with [mutate4java's spec.md](https://github.com/unclebob/mutate4java)
+as the reference (the most mature of the three upstream versions): the CLI
+surface, option defaults, selection semantics, report skeleton, and exit codes
+converge to it with **zero local-only inventions**. Cross-repo decisions live
+as ADRs in the luatools notes repo (`projects/luatools/docs/adr/`).
+
+**Aligned invariants (对齐不变量)**
+
+- Exit codes `0` success / `1` usage / `2` baseline failed / `3` survived
+  (the java convention — clj/go only had 0/1).
+- Manifest embedded as a `--[[ ]]` footer comment in the target file
+  (ADR-0002; the external `.mutate4lua/manifest/` store is abolished, with a
+  one-off migration script for existing stores).
+- Differential selection: no manifest → all covered sites; unchanged module
+  hash → 0 sites; changed hash → changed scopes only. Manifest is written
+  only after a clean run (no survivors, or nothing to execute) — the local
+  "auto-record at 90% kill score" rule is abolished (ADR-0004).
+- Option surface = upstream set: `--scan`, `--update-manifest`, `--lines`,
+  `--since-last-run`, `--mutate-all`, `--mutation-warning` (50),
+  `--max-workers` (cores/2), `--timeout-factor` (**10**, not the old local 15),
+  `--test-command`, `--reuse-coverage`, `--verbose`. Removed local-only
+  options: `--index-suites`, `--lane`, `--runner`, `--dry-run`,
+  `--poll-interval`, `--json` (ADR-0004; `--migrate-manifest` becomes a
+  one-off migration script, not a CLI flag).
+- Mutation set: boolean flip, comparison/arithmetic operator swaps,
+  `and` ↔ `or`, unary `not`/`-` removal, `0` ↔ `1`, rvalue → `nil`
+  (the Lua counterpart of java's rvalue → `null`).
+- Scope identity is declaration-based, not line-based (java spec §7.3).
+- Worker copies of the module; originals are never mutated in place; a
+  timed-out mutant counts as killed.
+
+**Deliberate deviations (有意偏离)**
+
+- Host-provided driver script instead of a built-in build-tool invocation
+  (maven / `go test`) — Lua has no standard build or test runner; the driver
+  contract is the Lua counterpart (suites/lane parameters removed, ADR-0004).
+- Coverage source is **luacov** artifacts only (ADR-0003) — the Lua
+  counterpart of JaCoCo/coverprofile; driver-produced ad-hoc coverage formats
+  are not accepted.
+- Scope semantic hash = FNV-1a over the normalized AST serialization
+  (format-insensitive, clj `pr-str` semantics upgraded to AST; the three
+  upstreams disagree — clj format-insensitive / go whitespace-normalized /
+  java raw-substring — so this picks the semantics that fits the AST
+  migration, ADR-0001/0004).
+
+**Breaking changes on this branch**: suites/`--lane`, `--json`, the external
+manifest store, the 90% auto-record rule, and ad-hoc driver coverage are all
+removed. See "Migrating" for the upgrade path.
+
 ## Features
 
 - Accepts one Lua source file target.
