@@ -11,11 +11,10 @@ local util = require("mutate4lua.util")
 
 local parallel = {}
 
--- 0 means busy-wait: keep re-scanning the sentinels with no sleep at all. With
+-- Busy-wait: keep re-scanning the sentinels with no sleep at all. With
 -- lazy-loaded suites each mutant runs in well under a second, so a coarse sleep
 -- between polls leaves workers idle far longer than the work itself. Busy-wait
--- forks no shell and gives the tightest refill; a positive --poll-interval is
--- the escape hatch for machines without a spare core (see _sleep).
+-- forks no shell and gives the tightest refill.
 local DEFAULT_POLL_INTERVAL = 0
 -- 124 means "ended by the timeout path" (the `timeout` command or the
 -- watchdog below). The launcher's `cd` guard also reports 124 when the
@@ -72,9 +71,8 @@ local function _build_launcher_script(workspace, command, timeout_seconds, timeo
 end
 
 local function _sleep(seconds)
-  -- A non-positive interval means busy-wait: do not fork a shell at all. Only a
-  -- positive interval throttles the poll loop by sleeping (one `sh` per idle
-  -- scan), trading a little wall-clock for an idle CPU on constrained machines.
+  -- The poll interval is hard-coded to 0 (busy-wait). The parameter is kept
+  -- only so the internal shape matches the engine override hook used in tests.
   if not (seconds and seconds > 0) then
     return
   end
@@ -118,7 +116,6 @@ end
 --   timeout         seconds before a job is force-killed (optional)
 --   timeout_command "timeout" / "gtimeout" / false (optional)
 --   on_complete(i, result)  optional callback fired in completion order
---   poll_interval   seconds to sleep when no job finished (default 0 = busy-wait)
 --   launch(script)  optional override for launching a detached job (tests)
 --   sleep(seconds)  optional override for the poll sleep (tests)
 --
@@ -127,7 +124,6 @@ end
 function parallel.run(spec)
   local worker_count = math.max(1, math.floor(spec.worker_count or 1))
   local job_count = spec.job_count or 0
-  local poll_interval = spec.poll_interval or DEFAULT_POLL_INTERVAL
   local results = {}
   if job_count <= 0 then
     return results
@@ -252,7 +248,7 @@ function parallel.run(spec)
     end
     dispatch()
     if not progressed then
-      sleep(poll_interval)
+      sleep(DEFAULT_POLL_INTERVAL)
     end
   end
 

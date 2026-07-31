@@ -19,28 +19,40 @@ describe("scanner.analyze scope detection", function()
 
   it("detects `local function name` syntax", function()
     local result = analyze("local function bar()\n  return 1\nend\nreturn bar\n")
-    assert.is_not_nil(find_scope(result, "function:bar:1"))
+    assert.is_not_nil(find_scope(result, "function:bar"))
   end)
 
   it("detects `function M.foo` syntax", function()
     local result = analyze("local M = {}\nfunction M.foo(x)\n  return x\nend\nreturn M\n")
-    assert.is_not_nil(find_scope(result, "function:M.foo:2"))
+    assert.is_not_nil(find_scope(result, "function:M.foo"))
   end)
 
   it("detects `function M:foo` colon-method syntax", function()
     local result = analyze("local M = {}\nfunction M:baz(x)\n  return x\nend\nreturn M\n")
-    assert.is_not_nil(find_scope(result, "function:M:baz:2"))
+    assert.is_not_nil(find_scope(result, "function:M:baz"))
   end)
 
-  it("emits `function:anonymous@<line>:<line>` for unnamed function expressions", function()
+  it("emits `function:<anonymous>` for unnamed function expressions", function()
     local result = analyze("local f = function(x)\n  return x\nend\nreturn f\n")
-    assert.is_not_nil(find_scope(result, "function:anonymous@1:1"))
+    assert.is_not_nil(find_scope(result, "function:<anonymous>"))
+  end)
+
+  it("disambiguates duplicate function names with an occurrence index", function()
+    local result = analyze("local function foo() return 1 end\nlocal function foo() return 2 end\n")
+    assert.is_not_nil(find_scope(result, "function:foo"))
+    assert.is_not_nil(find_scope(result, "function:foo#2"))
+  end)
+
+  it("disambiguates duplicate anonymous functions with an occurrence index", function()
+    local result = analyze("local a = function() return 1 end\nlocal b = function() return 2 end\n")
+    assert.is_not_nil(find_scope(result, "function:<anonymous>"))
+    assert.is_not_nil(find_scope(result, "function:<anonymous>#2"))
   end)
 
   it("records each function's start and end lines", function()
     local result = analyze("local function a()\n  return 1\nend\n\nlocal function b()\n  return 2\nend\n")
-    local scope_a = find_scope(result, "function:a:1")
-    local scope_b = find_scope(result, "function:b:5")
+    local scope_a = find_scope(result, "function:a")
+    local scope_b = find_scope(result, "function:b")
     assert.are.equal(1, scope_a.start_line)
     assert.are.equal(3, scope_a.end_line)
     assert.are.equal(5, scope_b.start_line)
@@ -48,20 +60,40 @@ describe("scanner.analyze scope detection", function()
   end)
 end)
 
+describe("scanner.analyze scope identity stability", function()
+  it("keeps the same id when a function moves to a different line", function()
+    local source_a = "local function f()\n  return 1\nend\nreturn f\n"
+    local source_b = "\nlocal function f()\n  return 1\nend\nreturn f\n"
+    local a = find_scope(analyze(source_a), "function:f")
+    local b = find_scope(analyze(source_b), "function:f")
+    assert.is_not_nil(a)
+    assert.is_not_nil(b)
+    assert.are.equal(a.id, b.id)
+  end)
+
+  it("changes the id when a function is renamed", function()
+    local a = find_scope(analyze("local function f() return 1 end\n"), "function:f")
+    local b = find_scope(analyze("local function g() return 1 end\n"), "function:g")
+    assert.is_not_nil(a)
+    assert.is_not_nil(b)
+    assert.are_not.equal(a.id, b.id)
+  end)
+end)
+
 describe("scanner.analyze hash stability", function()
   it("produces identical hashes when only whitespace differs", function()
     local source_a = "local function f()\n  return 1\nend\nreturn f\n"
     local source_b = "local function f()\n\n  return 1\nend\nreturn f\n"
-    local fa = find_scope(analyze(source_a), "function:f:1")
-    local fb = find_scope(analyze(source_b), "function:f:1")
+    local fa = find_scope(analyze(source_a), "function:f")
+    local fb = find_scope(analyze(source_b), "function:f")
     assert.are.equal(fa.semantic_hash, fb.semantic_hash)
   end)
 
   it("produces identical hashes when only comments differ", function()
     local source_a = "local function f()\n  return 1\nend\nreturn f\n"
     local source_b = "local function f()\n  -- explanation\n  return 1 -- inline\nend\nreturn f\n"
-    local fa = find_scope(analyze(source_a), "function:f:1")
-    local fb = find_scope(analyze(source_b), "function:f:1")
+    local fa = find_scope(analyze(source_a), "function:f")
+    local fb = find_scope(analyze(source_b), "function:f")
     assert.are.equal(fa.semantic_hash, fb.semantic_hash)
   end)
 
@@ -76,18 +108,15 @@ describe("scanner.analyze hash stability", function()
     local source_b = "local function a()\n  return 1\nend\nlocal function b()\n  return 2 ~= 3\nend\n"
     local result_a = analyze(source_a)
     local result_b = analyze(source_b)
-    local a1 = find_scope(result_a, "function:a:1")
-    local a2 = find_scope(result_b, "function:a:1")
-    local b1 = find_scope(result_a, "function:b:4")
-    local b2 = find_scope(result_b, "function:b:4")
+    local a1 = find_scope(result_a, "function:a")
+    local a2 = find_scope(result_b, "function:a")
+    local b1 = find_scope(result_a, "function:b")
+    local b2 = find_scope(result_b, "function:b")
     assert.are.equal(a1.semantic_hash, a2.semantic_hash)
     assert.are_not.equal(b1.semantic_hash, b2.semantic_hash)
   end)
 
   it("also bumps the chunk-scope hash when any contained scope changes", function()
-    -- The chunk scope spans the entire file and therefore covers tokens
-    -- inside every function. Any semantic edit anywhere flips the chunk hash,
-    -- which conservatively forces re-mutation of top-level sites.
     local before = analyze("local function f()\n  return 1\nend\nreturn f\n")
     local after = analyze("local function f()\n  return 1 + 1\nend\nreturn f\n")
     assert.are_not.equal(before.scopes[1].semantic_hash, after.scopes[1].semantic_hash)
@@ -98,22 +127,22 @@ describe("scanner.analyze scope set drift", function()
   it("adds a new scope when a function is added", function()
     local before = analyze("local function a() return 1 end\n")
     local after = analyze("local function a() return 1 end\nlocal function b() return 2 end\n")
-    assert.is_nil(find_scope(before, "function:b:2"))
-    assert.is_not_nil(find_scope(after, "function:b:2"))
+    assert.is_nil(find_scope(before, "function:b"))
+    assert.is_not_nil(find_scope(after, "function:b"))
   end)
 
   it("drops the scope when its function is deleted", function()
     local before = analyze("local function a() return 1 end\nlocal function b() return 2 end\n")
     local after = analyze("local function a() return 1 end\n")
-    assert.is_not_nil(find_scope(before, "function:b:2"))
-    assert.is_nil(find_scope(after, "function:b:2"))
+    assert.is_not_nil(find_scope(before, "function:b"))
+    assert.is_nil(find_scope(after, "function:b"))
   end)
 end)
 
 describe("scanner.analyze mutation sites", function()
   it("assigns sites inside a function to that function's scope id", function()
     local result = analyze("local function f()\n  return 1 == 2\nend\nreturn f\n")
-    local fn_scope = find_scope(result, "function:f:1")
+    local fn_scope = find_scope(result, "function:f")
     local found = false
     for _, site in ipairs(result.sites) do
       if site.description == "replace == with ~=" then

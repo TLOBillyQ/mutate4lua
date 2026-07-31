@@ -1,6 +1,8 @@
 local lexer = require("mutate4lua.internal.lexer")
 local util = require("mutate4lua.util")
+
 local scanner = {}
+
 local binary_replacements = {
   ["=="] = {replacement = "~=", description = "replace == with ~="},
   ["~="] = {replacement = "==", description = "replace ~= with =="},
@@ -15,6 +17,7 @@ local binary_replacements = {
   ["and"] = {replacement = "or", description = "replace and with or"},
   ["or"] = {replacement = "and", description = "replace or with and"},
 }
+
 local expression_breakers = {
   ["("] = true,
   ["{"] = true,
@@ -47,21 +50,28 @@ local expression_breakers = {
   ["until"] = true,
   [";"] = true,
 }
+
 -- for/while push via their `do`; pushing at the keyword too would double-push.
 local block_starters = {
   ["if"] = true,
 }
+
 local function previous_token(tokens, index)
   return tokens[index - 1]
 end
+
 local function next_token(tokens, index)
   return tokens[index + 1]
 end
-local function function_name(tokens, index)
+
+-- Declaration-based function name: the raw dotted/colon name for named
+-- functions, "<anonymous>" for function expressions. Duplicate names are
+-- disambiguated by occurrence index later (in source order).
+local function function_base_name(tokens, index)
   local token = next_token(tokens, index)
   local parts = {}
   if token and token.value == "(" then
-    return "anonymous@" .. tokens[index].line
+    return "<anonymous>"
   end
   while token do
     if token.value == "(" then
@@ -75,10 +85,11 @@ local function function_name(tokens, index)
     token = next_token(tokens, index + #parts)
   end
   if #parts == 0 then
-    return "anonymous@" .. tokens[index].line
+    return "<anonymous>"
   end
   return table.concat(parts)
 end
+
 local function line_count(text)
   local count = 1
   local index = 1
@@ -91,6 +102,7 @@ local function line_count(text)
     index = found + 1
   end
 end
+
 local function build_scopes(source_file, relative_file, source, tokens)
   local scopes = {
     {
@@ -103,12 +115,13 @@ local function build_scopes(source_file, relative_file, source, tokens)
     }
   }
   local stack = {}
+  local functions = {}
   for index, token in ipairs(tokens) do
     if token.type == "keyword" then
       if token.value == "function" then
         stack[#stack + 1] = {
           kind = "function",
-          name = function_name(tokens, index),
+          base_name = function_base_name(tokens, index),
           start_line = token.line,
           start_pos = token.start_pos,
         }
@@ -128,16 +141,8 @@ local function build_scopes(source_file, relative_file, source, tokens)
       elseif token.value == "end" then
         local block = table.remove(stack)
         if block and block.kind == "function" then
-          local id = string.format("function:%s:%d", block.name, block.start_line)
-          for _, scope in ipairs(scopes) do
-            if scope.id == id then
-              id = id .. "@" .. block.start_pos
-              break
-            end
-          end
-          scopes[#scopes + 1] = {
-            id = id,
-            kind = "function",
+          functions[#functions + 1] = {
+            base_name = block.base_name,
             start_line = block.start_line,
             end_line = token.line,
             start_pos = block.start_pos,
@@ -147,11 +152,30 @@ local function build_scopes(source_file, relative_file, source, tokens)
       end
     end
   end
+  local name_counts = {}
+  for _, fn in ipairs(functions) do
+    local count = (name_counts[fn.base_name] or 0) + 1
+    name_counts[fn.base_name] = count
+    local id
+    if count == 1 then
+      id = "function:" .. fn.base_name
+    else
+      id = "function:" .. fn.base_name .. "#" .. count
+    end
+    scopes[#scopes + 1] = {
+      id = id,
+      kind = "function",
+      start_line = fn.start_line,
+      end_line = fn.end_line,
+      start_pos = fn.start_pos,
+      end_pos = fn.end_pos,
+    }
+  end
   for _, scope in ipairs(scopes) do
     local parts = {}
-    for _, token in ipairs(tokens) do
-      if token.start_pos >= scope.start_pos and token.end_pos <= scope.end_pos then
-        parts[#parts + 1] = token.value
+    for _, t in ipairs(tokens) do
+      if t.start_pos >= scope.start_pos and t.end_pos <= scope.end_pos then
+        parts[#parts + 1] = t.value
       end
     end
     scope.semantic_hash = util.fnv1a64(table.concat(parts, " "))
@@ -159,6 +183,7 @@ local function build_scopes(source_file, relative_file, source, tokens)
   end
   return scopes
 end
+
 local function assign_scope(scopes, position)
   local winner = scopes[1]
   local best_span = winner.end_pos - winner.start_pos
@@ -173,6 +198,7 @@ local function assign_scope(scopes, position)
   end
   return winner
 end
+
 local function add_site(sites, scopes, source, token, replacement, description)
   local scope = assign_scope(scopes, token.start_pos)
   sites[#sites + 1] = {
@@ -187,6 +213,7 @@ local function add_site(sites, scopes, source, token, replacement, description)
     scope_id = scope.id,
   }
 end
+
 local function is_unary_minus(tokens, index)
   local prev = previous_token(tokens, index)
   if not prev then
@@ -194,6 +221,7 @@ local function is_unary_minus(tokens, index)
   end
   return expression_breakers[prev.value] == true
 end
+
 local function match_call(tokens, index)
   local token = tokens[index]
   if not token or token.type ~= "identifier" then
@@ -242,6 +270,7 @@ local function match_call(tokens, index)
   end
   return start_index, finish
 end
+
 -- A call in statement position can only be replaced by a statement, so the
 -- call -> nil site is only offered when the previous token proves expression
 -- position. Statement openers (`then`, `do`, `;`, chunk start) are absent.
@@ -276,6 +305,7 @@ local call_expression_preceders = {
   ["elseif"] = true,
   ["until"] = true,
 }
+
 local function is_expression_call(tokens, index)
   local prev = previous_token(tokens, index)
   if not prev then
@@ -283,6 +313,7 @@ local function is_expression_call(tokens, index)
   end
   return call_expression_preceders[prev.value] == true
 end
+
 local function add_call_site(sites, scopes, source, tokens, start_index, end_index)
   local start_token = tokens[start_index]
   local end_token = tokens[end_index]
@@ -300,6 +331,7 @@ local function add_call_site(sites, scopes, source, tokens, start_index, end_ind
     scope_id = scope.id,
   }
 end
+
 function scanner.analyze(source_file, relative_file, source)
   -- analyze normalizes for its own position/slicing logic; lexer.tokenize
   -- normalizes again (idempotent no-op) so tokenize stays self-contained.
@@ -365,7 +397,9 @@ function scanner.analyze(source_file, relative_file, source)
     sites = sites,
   }
 end
+
 function scanner.apply_mutation(source, site)
   return source:sub(1, site.start_pos - 1) .. site.replacement_text .. source:sub(site.end_pos + 1)
 end
+
 return scanner

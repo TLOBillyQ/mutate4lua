@@ -35,8 +35,7 @@ end
 -- Forces exactly one idle scan per job without real concurrency: launch records
 -- each job's status sentinel path (parsed from the launcher script) but writes
 -- nothing, so the first scan finds no sentinel. The paired completing_sleep then
--- writes the sentinels, so the next scan completes the jobs. This lets a test
--- observe the poll_interval the loop hands to sleep on an idle scan.
+-- writes the sentinels, so the next scan completes the jobs.
 local function deferred_launch(state)
   return function(script_path)
     local script = read_file(script_path)
@@ -156,7 +155,7 @@ describe("parallel.run", function()
     end
   end)
 
-  it("defaults poll_interval to 0 so the idle wait does not fork a shell", function()
+  it("uses busy-wait (interval 0) so the idle wait does not fork a shell", function()
     local state = { pending = {}, intervals = {} }
     parallel.run({
       worker_count = 1,
@@ -168,21 +167,6 @@ describe("parallel.run", function()
       sleep = completing_sleep(state),
     })
     assert.are.same({ 0 }, state.intervals)
-  end)
-
-  it("forwards an explicit poll_interval to the idle sleep", function()
-    local state = { pending = {}, intervals = {} }
-    parallel.run({
-      worker_count = 1,
-      job_count = 1,
-      workspaces = workspaces,
-      prepare = function() end,
-      command = function() return "true" end,
-      poll_interval = 0.05,
-      launch = deferred_launch(state),
-      sleep = completing_sleep(state),
-    })
-    assert.are.same({ 0.05 }, state.intervals)
   end)
 
   it("embeds the timeout command and atomic sentinel commit in the launcher", function()

@@ -1,5 +1,7 @@
 local util = require("mutate4lua.util")
+
 local project = {}
+
 local ignored_segments = {
   ["/.git/"] = true,
   ["/.mutate4lua/"] = true,
@@ -7,6 +9,7 @@ local ignored_segments = {
   ["/.coverage/"] = true,
   ["/__pycache__/"] = true,
 }
+
 local function has_root_marker(path)
   if util.path_exists(util.join_path(path, ".git")) then
     return true
@@ -19,6 +22,7 @@ local function has_root_marker(path)
   end
   return false
 end
+
 function project.find_root(workspace_root, target_file)
   workspace_root = util.absolute_path(workspace_root)
   local cursor = util.parent_dir(util.absolute_path(target_file))
@@ -37,9 +41,11 @@ function project.find_root(workspace_root, target_file)
   end
   return workspace_root
 end
+
 function project.relative_file(project_root, path)
   return util.relative_path(project_root, path):gsub("\\", "/")
 end
+
 function project.project_hash(project_root, target_file, stripped_source)
   local files = util.list_files(project_root, {"*.lua", "*.rockspec"})
   local target_absolute = util.absolute_path(target_file)
@@ -70,16 +76,19 @@ function project.project_hash(project_root, target_file, stripped_source)
   end
   return util.fnv1a64(table.concat(parts))
 end
+
+-- Host-facing helper: a command that runs the default driver with no coverage.
+-- The engine builds its own driver invocations; this is only for hosts that
+-- want to reuse the reference driver outside the mutation loop.
 function project.default_test_command(tool_root, _opts)
   return {
     "lua",
     util.join_path(tool_root, "lib", "mutate4lua", "driver", "default.lua"),
-    "--root",
-    ".",
-    "--tool-root",
-    tool_root,
+    "--no-coverage",
+    "--quiet",
   }
 end
+
 function project.discover_test_files(project_root)
   local candidates = {}
   local patterns = {
@@ -98,4 +107,5 @@ function project.discover_test_files(project_root)
   table.sort(candidates)
   return candidates
 end
+
 return project

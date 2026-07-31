@@ -32,13 +32,13 @@ describe("manifest.read", function()
   end)
 
   it("returns nil when the end marker ]] is missing", function()
-    write_file(path, "return {}\n\n--[[ mutate4lua-manifest\nversion=2\n")
+    write_file(path, "return {}\n\n--[[ mutate4lua-manifest\nversion=3\n")
     assert.is_nil(manifest.read(path))
   end)
 
   it("parses version, projectHash, and a single scope", function()
     write_file(path, "return {}\n\n" .. manifest_block({
-      "version=2",
+      "version=3",
       "projectHash=cafebabedeadbeef",
       "scope.0.id=chunk:m.lua",
       "scope.0.kind=chunk",
@@ -48,7 +48,7 @@ describe("manifest.read", function()
     }) .. "\n")
     local data = manifest.read(path)
     assert.is_not_nil(data)
-    assert.are.equal(2, data.version)
+    assert.are.equal(3, data.version)
     assert.are.equal("cafebabedeadbeef", data.project_hash)
     assert.are.equal(1, #data.scopes)
     assert.are.equal("chunk:m.lua", data.scopes[1].id)
@@ -70,9 +70,9 @@ describe("manifest.read", function()
     assert.are.equal(1, manifest.read(path).version)
   end)
 
-  it("preserves lastMutation fields when present", function()
+  it("ignores legacy lastMutation fields", function()
     write_file(path, "return {}\n\n" .. manifest_block({
-      "version=2",
+      "version=3",
       "projectHash=aaaa",
       "scope.0.id=chunk:m.lua",
       "scope.0.kind=chunk",
@@ -86,11 +86,11 @@ describe("manifest.read", function()
       "scope.0.lastMutationKilled=3",
     }) .. "\n")
     local scope = manifest.read(path).scopes[1]
-    assert.are.equal("2026-05-21T10:00:00Z", scope.last_mutated_at)
-    assert.are.equal("behavior", scope.last_mutation_lane)
-    assert.are.equal("passed", scope.last_mutation_status)
-    assert.are.equal(3, scope.last_mutation_sites)
-    assert.are.equal(3, scope.last_mutation_killed)
+    assert.is_nil(scope.last_mutated_at)
+    assert.is_nil(scope.last_mutation_lane)
+    assert.is_nil(scope.last_mutation_status)
+    assert.is_nil(scope.last_mutation_sites)
+    assert.is_nil(scope.last_mutation_killed)
   end)
 end)
 
@@ -101,43 +101,41 @@ describe("manifest.write", function()
 
   it("round-trips a minimal scope record", function()
     manifest.write(path, "return {}\n", {
-      version = 2,
+      version = 3,
       project_hash = "1111",
       scopes = {
         {id = "chunk:m.lua", kind = "chunk", start_line = 1, end_line = 1, semantic_hash = "2222"},
       },
     })
     local data = manifest.read(path)
-    assert.are.equal(2, data.version)
+    assert.are.equal(3, data.version)
     assert.are.equal("1111", data.project_hash)
     assert.are.equal("chunk:m.lua", data.scopes[1].id)
     assert.are.equal("2222", data.scopes[1].semantic_hash)
   end)
 
-  it("round-trips lastMutation metadata", function()
+  it("does not write lastMutation metadata", function()
     manifest.write(path, "return {}\n", {
-      version = 2,
+      version = 3,
       project_hash = "1111",
       scopes = {
         {
           id = "chunk:m.lua", kind = "chunk", start_line = 1, end_line = 1, semantic_hash = "2222",
           last_mutated_at = "2026-05-21T10:00:00Z",
-          last_mutation_lane = "behavior",
           last_mutation_status = "passed",
           last_mutation_sites = 7,
           last_mutation_killed = 5,
         },
       },
     })
-    local scope = manifest.read(path).scopes[1]
-    assert.are.equal("2026-05-21T10:00:00Z", scope.last_mutated_at)
-    assert.are.equal(5, scope.last_mutation_killed)
-    assert.are.equal(7, scope.last_mutation_sites)
+    local raw = read_file(path)
+    assert.is_nil(raw:find("lastMutation", 1, true))
+    assert.is_nil(raw:find("lastMutatedAt", 1, true))
   end)
 
   it("places the manifest tail after the source, separated by a blank line", function()
     manifest.write(path, "return 1\n", {
-      version = 2,
+      version = 3,
       project_hash = "1111",
       scopes = {
         {id = "chunk:m.lua", kind = "chunk", start_line = 1, end_line = 1, semantic_hash = "2222"},
@@ -150,9 +148,9 @@ describe("manifest.write", function()
 end)
 
 describe("manifest.serialize", function()
-  it("emits version=2 when data.version is unset", function()
+  it("emits version=3 when data.version is unset", function()
     local out = manifest.serialize({scopes = {}})
-    assert.matches("version=2", out)
+    assert.matches("version=3", out)
   end)
 
   it("respects an explicit version field", function()
@@ -160,9 +158,9 @@ describe("manifest.serialize", function()
     assert.matches("version=5", out)
   end)
 
-  it("omits lastMutation fields when nil", function()
+  it("omits lastMutation fields", function()
     local out = manifest.serialize({
-      version = 2,
+      version = 3,
       project_hash = "x",
       scopes = {
         {id = "chunk:m.lua", kind = "chunk", start_line = 1, end_line = 1, semantic_hash = "y"},
@@ -175,7 +173,7 @@ end)
 
 describe("manifest.strip", function()
   it("removes the manifest tail and leaves the source", function()
-    local source = "local m = {}\nreturn m\n\n--[[ mutate4lua-manifest\nversion=2\nprojectHash=abc\n]]\n"
+    local source = "local m = {}\nreturn m\n\n--[[ mutate4lua-manifest\nversion=3\nprojectHash=abc\n]]\n"
     assert.are.equal("local m = {}\nreturn m\n", manifest.strip(source))
   end)
 

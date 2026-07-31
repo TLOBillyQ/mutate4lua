@@ -10,23 +10,18 @@ local function _help_text(command_name)
     "子命令 / Subcommands:",
     "  (default)          运行变异测试 / run mutation tests",
     "  --scan             扫描变异位点 / scan mutation sites",
-    "  --update-manifest  写入外部 manifest 存储 / write manifest to the external store",
-    "  --migrate-manifest 迁移旧 footer manifest 到外部存储 / migrate a legacy footer manifest into the store",
-    "  --index-suites     列出 suites / list test suites",
+    "  --update-manifest  写入 embedded manifest footer / write embedded manifest footer",
     "",
     "选项 / Options:",
-    "  --lane behavior|contract   默认 behavior / default behavior",
-    "  --runner harness|busted    默认 harness / default harness",
-    "  --mutate-all               忽略 manifest 变异所有位点（默认跳过未修改 scope）",
+    "  --mutate-all               忽略 manifest 变异所有位点 / ignore manifest and mutate all sites",
+    "  --since-last-run           只变异与 manifest 不同的 scope / restrict to changed scopes",
     "  --lines N,N                限制行号 / restrict to lines",
+    "  --reuse-coverage           复用已有 luacov 报告 / reuse existing luacov report",
     "  --max-workers N            并行 worker 数（默认 CPU 核数的一半，1=串行）",
-    "  --poll-interval N          并行轮询间隔秒数（默认 0=忙等不 fork；>0 在无空余核时让出 CPU）",
-    "  --timeout-factor N         超时倍数 / timeout multiplier (default 15)",
+    "  --timeout-factor N         超时倍数 / timeout multiplier (default 10)",
     "  --test-command CMD         自定义测试命令 / custom test command",
-    "  --mutation-warning N       变异数量警告阈值",
-    "  --dry-run                  仅列出 suites 不执行（--index-suites 的修饰符）/ list suites only (modifier of --index-suites)",
-    "  --json                     JSON 输出",
-    "  --verbose                  详细输出",
+    "  --mutation-warning N       变异数量警告阈值 / mutation count warning threshold (default 50)",
+    "  --verbose                  详细输出 / verbose output",
     "  -h, --help                 显示帮助 / show help",
   }, "\n") .. "\n"
 end
@@ -46,15 +41,15 @@ local function _parse_args(args)
   local options = {
     target = nil,
     subcommand = "mutate",
-    lane = "behavior",
-    runner = "harness",
-    dry_run = false,
+    scan = false,
+    update_manifest = false,
     mutate_all = false,
+    since_last_run = false,
+    reuse_coverage = false,
     line_set = nil,
-    timeout_factor = 15,
+    timeout_factor = 10,
     test_command = nil,
-    mutation_warning = nil,
-    json = false,
+    mutation_warning = 50,
     verbose = false,
     help = false,
   }
@@ -65,36 +60,25 @@ local function _parse_args(args)
     if token == "--help" or token == "-h" then
       options.help = true
     elseif token == "--scan" then
+      options.scan = true
       options.subcommand = "scan"
     elseif token == "--update-manifest" then
+      options.update_manifest = true
       options.subcommand = "update-manifest"
-    elseif token == "--migrate-manifest" then
-      options.subcommand = "migrate-manifest"
-    elseif token == "--index-suites" then
-      options.subcommand = "index-suites"
-    elseif token == "--dry-run" then
-      options.dry_run = true
     elseif token == "--mutate-all" then
       options.mutate_all = true
-    elseif token == "--json" then
-      options.json = true
+    elseif token == "--since-last-run" then
+      options.since_last_run = true
+    elseif token == "--reuse-coverage" then
+      options.reuse_coverage = true
     elseif token == "--verbose" then
       options.verbose = true
-    elseif token == "--lane" then
-      index = index + 1
-      options.lane = args[index] or error("--lane requires a value", 0)
-    elseif token == "--runner" then
-      index = index + 1
-      options.runner = args[index] or error("--runner requires a value", 0)
     elseif token == "--lines" then
       index = index + 1
       options.line_set = _parse_line_set(args[index] or error("--lines requires a value", 0))
     elseif token == "--max-workers" then
       index = index + 1
       options.max_workers = tonumber(args[index] or "") or error("--max-workers requires a numeric value", 0)
-    elseif token == "--poll-interval" then
-      index = index + 1
-      options.poll_interval = tonumber(args[index] or "") or error("--poll-interval requires a numeric value", 0)
     elseif token == "--timeout-factor" then
       index = index + 1
       options.timeout_factor = tonumber(args[index] or "") or error("--timeout-factor requires a numeric value", 0)
@@ -115,15 +99,26 @@ local function _parse_args(args)
   return options
 end
 
--- The library ships no default driver path: hosts pass their driver scripts
--- through env (env.default_driver for the harness runner, env.busted_driver
--- for the busted runner). A nil result makes the engine fail with a clear
--- "driver script required" error wherever a driver is actually needed.
-local function _resolve_driver_script(options, env)
-  if options.runner == "busted" then
-    return env.busted_driver
-  end
-  return env.default_driver
+local function _has_conflict(options)
+  local scan = options.scan
+  local update = options.update_manifest
+  local lines = options.line_set ~= nil
+  local since = options.since_last_run
+  local all = options.mutate_all
+  local reuse = options.reuse_coverage
+
+  if scan and since then return "--scan cannot be combined with --since-last-run" end
+  if scan and all then return "--scan cannot be combined with --mutate-all" end
+  if scan and update then return "--scan cannot be combined with --update-manifest" end
+  if scan and reuse then return "--scan cannot be combined with --reuse-coverage" end
+  if lines and since then return "--lines cannot be combined with --since-last-run" end
+  if lines and all then return "--lines cannot be combined with --mutate-all" end
+  if lines and update then return "--lines cannot be combined with --update-manifest" end
+  if since and all then return "--since-last-run cannot be combined with --mutate-all" end
+  if update and since then return "--update-manifest cannot be combined with --since-last-run" end
+  if update and all then return "--update-manifest cannot be combined with --mutate-all" end
+  if update and reuse then return "--update-manifest cannot be combined with --reuse-coverage" end
+  return nil
 end
 
 function cli.run(args, env)
@@ -147,42 +142,22 @@ function cli.run(args, env)
     return 0
   end
 
-  if options.lane ~= "behavior" and options.lane ~= "contract" then
-    stderr:write("unsupported lane: ", tostring(options.lane), "\n")
-    return 1
-  end
-  if options.runner ~= "harness" and options.runner ~= "busted" then
-    stderr:write("unsupported runner: ", tostring(options.runner), "\n")
-    return 1
-  end
-  if options.dry_run and (options.subcommand == "scan" or options.subcommand == "update-manifest" or options.subcommand == "migrate-manifest") then
-    stderr:write("--dry-run cannot be combined with --", options.subcommand, "\n")
+  local conflict = _has_conflict(options)
+  if conflict then
+    stderr:write("error: ", conflict, "\n")
+    stderr:write(_help_text(command_name))
     return 1
   end
 
-  options.driver_script = _resolve_driver_script(options, env)
-
-  if options.dry_run then
-    if options.runner == "busted" and env.busted_discover then
-      local specs, err = env.busted_discover(options.lane)
-      if not specs then
-        stderr:write(tostring(err), "\n")
-        return 1
-      end
-      stdout:write(table.concat(specs, "\n"), "\n")
-      return 0
-    end
-    options.subcommand = "index-suites"
-  end
+  -- The library ships no default driver path: hosts pass their driver script
+  -- through env.default_driver. A nil result makes the engine fail with a clear
+  -- "driver script required" error wherever a driver is actually needed.
+  options.driver_script = env.default_driver
 
   if options.subcommand == "scan" then
     return engine.scan(options, env)
   elseif options.subcommand == "update-manifest" then
     return engine.update_manifest(options, env)
-  elseif options.subcommand == "migrate-manifest" then
-    return engine.migrate_manifest(options, env)
-  elseif options.subcommand == "index-suites" then
-    return engine.index_suites(options, env)
   else
     return engine.mutate(options, env)
   end
