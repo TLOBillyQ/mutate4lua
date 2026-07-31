@@ -1,0 +1,47 @@
+==============================================================================
+src/calc.lua
+==============================================================================
+ 1 local calc = {}
+
+ 1 function calc.add(a, b)
+ 1   return a + b
+   end
+
+ 1 function calc.sub(a, b)
+ 1   return a - b
+   end
+
+ 1 function calc.mul(a, b)
+ 1   return a * b
+   end
+
+ 1 function calc.div(a, b)
+ 1   if b == 0 then
+*0     return nil
+     end
+ 1   return a / b
+   end
+
+ 1 return calc
+
+==============================================================================
+test_calc.lua
+==============================================================================
+ 1 local calc = require("src.calc")
+
+ 1 assert(calc.add(1, 2) == 3)
+ 1 assert(calc.sub(5, 3) == 2)
+ 1 assert(calc.mul(2, 3) == 6)
+ 1 assert(calc.div(6, 2) == 3)
+   -- Intentionally never test calc.div(x, 0) — the zero-check branch is uncovered.
+
+==============================================================================
+Summary
+==============================================================================
+
+File          Hits Missed Coverage
+----------------------------------
+src/calc.lua  11   1      91.67%
+test_calc.lua 5    0      100.00%
+----------------------------------
+Total         16   1      94.12%

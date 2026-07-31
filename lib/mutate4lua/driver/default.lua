@@ -59,6 +59,7 @@ local function generate_luacov_report(requested_path)
   -- Try the luacov reporter module first; if it is unavailable fall back to
   -- the `luacov` command. The driver only needs coverage when explicitly
   -- requested, so a missing luacov is a hard error here, not a silent fallback.
+  local util = require("mutate4lua.util")
   local ok, reporter = pcall(require, "luacov.reporter")
   if ok and type(reporter) == "table" and type(reporter.report) == "function" then
     reporter.report()

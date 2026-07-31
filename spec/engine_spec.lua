@@ -270,7 +270,7 @@ describe("engine.mutate coverage handling", function()
       if kind == nil then
         lines[#lines + 1] = "        -- non-executable"
       elseif kind == false then
-        lines[#lines + 1] = "  ***0    print(" .. i .. ")"
+        lines[#lines + 1] = "  *0    print(" .. i .. ")"
       else
         lines[#lines + 1] = string.format("%6d    print(%d)", (tonumber(kind) or 1), i)
       end

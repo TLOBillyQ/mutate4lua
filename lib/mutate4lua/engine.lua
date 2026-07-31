@@ -164,10 +164,17 @@ local function _is_absolute_path(path)
   return path:sub(1, 1) == "/" or path:sub(1, 2) == "\\\\" or path:match("^%a:[/\\]") ~= nil
 end
 
--- Parse a standard luacov default reporter report. Coverage is tracked at
+-- Parse a standard luacov default-reporter report. Coverage is tracked at
 -- line granularity: a line is covered iff its right-aligned hit count is a
--- number greater than 0. "***0" marks an uncovered executable line; a blank
--- prefix marks a non-executable line.
+-- number greater than 0. "*0" marks an uncovered executable line; an empty
+-- count column marks a non-executable line.
+-- Real-format findings (verified against luacov 0.17.0):
+--   - Section separator: 78 "=" chars (matched by "^=+").
+--   - Hit-count column: right-aligned, width grows with max count (min 2).
+--   - Missed executable lines: *0 (single asterisk) at the count-column position.
+--   - Summary section: always the last block, headed by "Summary" as the path
+--     name; the parser stops when it encounters it to avoid parsing the
+--     coverage table as source lines.
 local function _parse_luacov_report(report_path, workspace_root, target_relative)
   local content = util.read_file(report_path)
   if not content then return nil end
@@ -185,6 +192,10 @@ local function _parse_luacov_report(report_path, workspace_root, target_relative
       index = index + 1
       if index > #lines then break end
       local filename = util.trim(lines[index])
+      -- luacov's default reporter always places the Summary section last;
+      -- its content is a coverage table, not per-line hit data.  Stop
+      -- parsing so coverage-table lines don't leak into a file entry.
+      if filename == "Summary" then break end
       index = index + 1
       if index > #lines or not lines[index]:match("^=+") then break end
       index = index + 1
@@ -421,16 +432,6 @@ local function _emit_empty_result(stdout, options, scan_ctx, message, baseline_s
   return 0
 end
 
-local function _covered_line_set(sites, covered_lines)
-  local set = {}
-  for _, site in ipairs(sites) do
-    if covered_lines[site.line] then
-      set[site.line] = true
-    end
-  end
-  return set
-end
-
 function engine.scan(options, env)
   local stdout = env.stdout or io.stdout
   local stderr = env.stderr or io.stderr
@@ -616,10 +617,11 @@ function engine.mutate(options, env)
     old_manifest ~= nil, module_hash_changed, differential, violating)
 
   if uncovered_count > 0 then
-    local uncovered_lines = _covered_line_set(sites, coverage_lines or {})
     local list = {}
-    for line, _ in pairs(uncovered_lines) do
-      list[#list + 1] = tostring(line)
+    for _, site in ipairs(data.sites) do
+      if not (coverage_lines or {})[site.line] then
+        list[#list + 1] = tostring(site.line)
+      end
     end
     if #list > 0 then
       table.sort(list)

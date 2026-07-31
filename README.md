@@ -155,6 +155,59 @@ runs must still work.
 `lib/mutate4lua/driver/default.lua` is a working starting point for a host
 driver.
 
+### Real luacov output format (parser contract)
+
+mutate4lua parses the **default reporter** output of luacov (the format produced
+by `luacov` with no custom reporter configured). The driver is responsible for
+producing this exact format. Key characteristics verified against real
+luacov 0.17.0 output:
+
+- **Section structure**: each source file appears in its own block delimited by
+  separator lines of 78 `=` characters (`^=+$`).
+  ```
+  ==============================================================================
+  <path as luacov saw it>
+  ==============================================================================
+  ```
+- **Hit-count column**: right-aligned; width grows with the largest hit count
+  (minimum 2 characters for `*0` to fit). The column is followed by one
+  separator space, then the source line **verbatim** (including its original
+  indentation).
+- **Missed executable lines**: displayed as `*0` (single asterisk) at the count
+  column position — no leading spaces. Example: `*0     return 0`.
+- **Non-executable lines** (blank lines, `end`, `else`, comments): NO count
+  prefix — the count column is empty (padding spaces), then the separator space,
+  then the source line. These lines advance the line counter but are NOT
+  recorded as executable.
+- **Summary section**: always the last block in the report, headed by
+  `Summary` as the "path" name. The parser stops when it encounters `Summary`
+  so the coverage table below it is not consumed.
+- **Path shapes**: luacov records paths as seen at `require()` time — they may
+  be **relative** (e.g. `src/foo.lua`) or **absolute** (e.g.
+  `/Users/.../src/foo.lua`). Absolute paths are normalized to
+  workspace-root-relative for target matching.
+
+### Installing luacov for Lua 5.4
+
+The driver must instrument the test run with luacov to produce
+`luacov.report.out`. Install method for Lua 5.4 (the only supported runtime):
+
+```sh
+luarocks --lua-version=5.4 --lua-dir=/opt/homebrew/opt/lua@5.4 install luacov
+```
+
+To make `require("luacov")` work under `lua5.4`:
+
+```sh
+export LUA_PATH="/Users/$USER/.luarocks/share/lua/5.4/?.lua;$LUA_PATH"
+```
+
+The reference driver (`lib/mutate4lua/driver/default.lua`) uses
+`luacov.runner.init()` / `luacov.runner.save_stats()` to instrument the test
+run and invokes `luacov.reporter.report()` to generate the report artifact.
+Hosts that cannot use luacov should provide `--test-command` (which disables
+coverage filtering with a warning).
+
 ## Manifest storage
 
 - The manifest is stored as an embedded `--[[ mutate4lua-manifest ... ]]`
