@@ -59,7 +59,7 @@ removed. See "Migrating" for the upgrade path.
 ## Features
 
 - Accepts one Lua source file target.
-- Discovers mutation sites with a Lua-aware lexer and scanner.
+- Discovers mutation sites with a luacheck AST-based scanner.
 - Tracks declaration scopes for differential mutation: by default only scopes
   whose semantic hash changed since the recorded manifest are re-tested;
   `--mutate-all` forces every covered site.
@@ -159,7 +159,7 @@ driver.
 
 - The manifest is stored as an embedded `--[[ mutate4lua-manifest ... ]]`
   footer comment at the end of the target source file.
-- It records manifest version `3`, the module hash, and for each scope:
+- It records manifest version `4`, the module hash, and for each scope:
   `id`, `kind`, `startLine`, `endLine`, `semanticHash`.
 - Legacy `lastMutation*` fields are ignored on read and never written.
 - Differential mode skips scopes whose `semanticHash` is unchanged.
@@ -168,7 +168,7 @@ driver.
   failure, after any survivor, or during `--scan`. `--lines` suppresses it.
 - The pre-alignment external store `.mutate4lua/manifest/` is no longer read
   or written. Use `tools/migrate_manifest.lua` once per target to move from
-  the old store/legacy footer to a fresh v3 footer:
+  the old store/legacy footer to a fresh v4 footer:
   `lua tools/migrate_manifest.lua src/foo.lua`.
 
 ## Migrating from the pre-alignment version
@@ -176,7 +176,7 @@ driver.
 1. Run `lua tools/migrate_manifest.lua <target.lua>` once per mutated file.
    It strips any legacy footer, deletes the corresponding
    `.mutate4lua/manifest/<relative>.manifest` store file, and appends a
-   freshly computed v3 footer.
+   freshly computed v4 footer.
 2. Remove the following options from scripts and CI: `--index-suites`,
    `--lane`, `--runner`, `--dry-run`, `--poll-interval`, `--json`,
    `--migrate-manifest`.
@@ -268,7 +268,7 @@ lua tools/mutate.lua src/demo/flag.lua --reuse-coverage
 完整选项列表见 `--help` 或上文英文 CLI 一节。
 
 manifest 机制：每个目标文件末尾的 footer 注释，内容为 `key=value` 正文：
-`version`（当前为 3）与 `projectHash` 头，加上每个 scope 的 `id` / `kind` /
+`version`（当前为 4）与 `projectHash` 头，加上每个 scope 的 `id` / `kind` /
 `startLine` / `endLine` / `semanticHash`。旧的 `lastMutation*` 字段读取时忽略、
 写入时不再生成。差异化模式跳过 hash 未变的 scope。manifest 仅在干净运行后
 （全部击杀或无 mutant 需执行）或 `--update-manifest` 时写入；baseline 失败、
@@ -276,7 +276,7 @@ manifest 机制：每个目标文件末尾的 footer 注释，内容为 `key=val
 
 从旧版本迁移：对每个目标文件执行
 `lua tools/migrate_manifest.lua src/foo.lua`，它会剥离旧 footer、删除对应
-`.mutate4lua/manifest/<relative>.manifest` 外部存储文件，并追加新的 v3 footer。
+`.mutate4lua/manifest/<relative>.manifest` 外部存储文件，并追加新的 v4 footer。
 之后可删除 `--index-suites`、`--lane`、`--runner`、`--dry-run`、
 `--poll-interval`、`--json`、`--migrate-manifest` 等旧选项；按新的 driver 契约
 更新自定义 driver；注意默认 `--timeout-factor` 已从 15 改为 10；如需覆盖率过滤请

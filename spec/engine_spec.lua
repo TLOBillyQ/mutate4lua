@@ -65,7 +65,7 @@ describe("engine.update_manifest", function()
   end)
   after_each(function() rm_rf(dir) end)
 
-  it("writes a v3 footer and does not require a driver", function()
+  it("writes a v4 footer and does not require a driver", function()
     write_file(target_abs, "return true\n")
     local out = {}
     local code = engine.update_manifest({target = target_rel}, {
@@ -75,7 +75,7 @@ describe("engine.update_manifest", function()
     assert.matches("manifest updated: m%.lua", table.concat(out))
     local data = manifest.read(target_abs)
     assert.is_not_nil(data)
-    assert.are.equal(3, data.version)
+    assert.are.equal(4, data.version)
     for _, scope in ipairs(data.scopes) do
       assert.is_nil(scope.last_mutated_at)
       assert.is_nil(scope.last_mutation_status)
@@ -102,14 +102,14 @@ describe("engine.mutate write gating", function()
   end)
   after_each(function() rm_rf(dir) end)
 
-  it("writes a v3 footer when all mutants are killed and --lines is unset", function()
+  it("writes a v4 footer when all mutants are killed and --lines is unset", function()
     write_file(target_abs, "return 1 == 2\n")
     local shell = make_shell({{ok = true}, {ok = false}, {ok = false}})
     local env = {cwd = dir, run_shell = shell.fn, stdout = null_buffer(), stderr = null_buffer()}
     engine.mutate({target = target_rel, test_command = "true", max_workers = 1}, env)
     local data = manifest.read(target_abs)
     assert.is_not_nil(data)
-    assert.are.equal(3, data.version)
+    assert.are.equal(4, data.version)
   end)
 
   it("does not write a footer when a mutant survives", function()
@@ -481,7 +481,7 @@ describe("engine.mutate parallel path", function()
     assert.is_nil(captured.poll_interval)
   end)
 
-  it("writes a v3 footer when every parallel mutant is killed", function()
+  it("writes a v4 footer when every parallel mutant is killed", function()
     write_file(target_abs, multi_site_body)
     engine.mutate({
       target = target_rel, test_command = "true",
@@ -489,7 +489,7 @@ describe("engine.mutate parallel path", function()
     }, parallel_env(function() return killed() end))
     local data = manifest.read(target_abs)
     assert.is_not_nil(data)
-    assert.are.equal(3, data.version)
+    assert.are.equal(4, data.version)
   end)
 end)
 

@@ -1,5 +1,5 @@
 -- One-off migration from the pre-alignment external manifest store to an
--- embedded v3 manifest footer.
+-- embedded v4 manifest footer.
 --
 -- Usage: lua tools/migrate_manifest.lua <file.lua>
 --
@@ -7,7 +7,7 @@
 --   1. strips any existing legacy footer manifest from the target file;
 --   2. removes the corresponding .mutate4lua/manifest/<relative>.manifest store
 --      file, if present;
---   3. computes a fresh v3 manifest from the stripped source;
+--   3. computes a fresh v4 manifest from the stripped source;
 --   4. appends the manifest as a --[[ mutate4lua-manifest ... ]] footer.
 
 local script_path = arg[0] or "."
@@ -61,7 +61,7 @@ end
 local data = scanner.analyze(abs_target, relative, stripped)
 local proj_hash = project.project_hash(project_root, abs_target, stripped)
 manifest.write(abs_target, stripped, {
-  version = 3,
+  version = 4,
   project_hash = proj_hash,
   scopes = data.scopes,
 })

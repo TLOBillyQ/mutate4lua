@@ -148,9 +148,9 @@ describe("manifest.write", function()
 end)
 
 describe("manifest.serialize", function()
-  it("emits version=3 when data.version is unset", function()
+  it("emits version=4 when data.version is unset", function()
     local out = manifest.serialize({scopes = {}})
-    assert.matches("version=3", out)
+    assert.matches("version=4", out)
   end)
 
   it("respects an explicit version field", function()

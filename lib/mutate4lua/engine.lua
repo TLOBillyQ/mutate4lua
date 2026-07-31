@@ -341,7 +341,7 @@ end
 local function _write_manifest(scan_ctx)
   local proj_hash = project.project_hash(scan_ctx.project_root, scan_ctx.abs_target, scan_ctx.stripped)
   manifest.write(scan_ctx.abs_target, scan_ctx.stripped, {
-    version = 3,
+    version = 4,
     project_hash = proj_hash,
     scopes = scan_ctx.scopes,
   })
@@ -766,7 +766,7 @@ function engine.update_manifest(options, env)
   local proj_hash = project.project_hash(project_root, abs_target, stripped)
 
   manifest.write(abs_target, stripped, {
-    version = 3,
+    version = 4,
     project_hash = proj_hash,
     scopes = data.scopes,
   })

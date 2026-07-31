@@ -90,7 +90,7 @@ end
 
 local function serialize_body(data)
   local lines = {
-    "version=" .. tostring(data.version or 3),
+    "version=" .. tostring(data.version or 4),
     "projectHash=" .. tostring(data.project_hash or ""),
   }
   for index, scope in ipairs(data.scopes or {}) do
