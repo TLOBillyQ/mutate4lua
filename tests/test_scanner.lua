@@ -281,4 +281,119 @@ function TestScanner:testBinaryOperatorSiteWithMultibyteCommentBeforeSite()
   lu.assertNotNil(load(mutated))
 end
 
+-- String-tag discrimination: luacheck uses the String tag both for real
+-- literals and for dot-sugar keys; only real literals may be mutated.
+
+local function count_sites(result, description)
+  local count = 0
+  for _, site in ipairs(result.sites) do
+    if site.description == description then count = count + 1 end
+  end
+  return count
+end
+
+function TestScanner:testSkipsDotSyntaxIndexKeys()
+  local result = analyze("local t = a.b\nreturn t\n")
+  lu.assertEquals(count_sites(result, "replace b with nil"), 0)
+end
+
+function TestScanner:testSkipsMethodNamesInInvoke()
+  local result = analyze("a:b(c)\n")
+  lu.assertEquals(count_sites(result, "replace b with nil"), 0)
+end
+
+function TestScanner:testSkipsBareTableConstructorKeys()
+  local result = analyze("local t = { id = 1 }\nreturn t\n")
+  lu.assertEquals(count_sites(result, "replace id with nil"), 0)
+end
+
+function TestScanner:testKeepsBracketFormStringKeysAsMutationTargets()
+  local result = analyze("local t = a[\"b\"]\nreturn t\n")
+  lu.assertEquals(count_sites(result, "replace b with nil"), 1)
+  local site = find_site(result, "replace b with nil")
+  lu.assertEquals(site.original_text, "\"b\"")
+  local source = "local t = a[\"b\"]\nreturn t\n"
+  lu.assertNotNil(load(scanner.apply_mutation(source, site)))
+end
+
+function TestScanner:testKeepsRealStringLiteralsAsMutationTargets()
+  local result = analyze("local t = { \"lit\" }\nreturn t\n")
+  lu.assertEquals(count_sites(result, "replace lit with nil"), 1)
+end
+
+-- expression-context classification: statement-list bodies must not yield
+-- Call→nil sites, and loop/repeat sub-expressions must keep theirs.
+
+function TestScanner:testSkipsCallToNilInsideElseBlock()
+  local result = analyze("if c then b() else d() end\n")
+  lu.assertEquals(count_sites(result, "replace d() with nil"), 0)
+  lu.assertEquals(count_sites(result, "replace b() with nil"), 0)
+end
+
+function TestScanner:testSkipsCallToNilInsideElseifElseBlock()
+  local result = analyze("if c1 then b1() elseif c2 then b2() else b3() end\n")
+  lu.assertEquals(count_sites(result, "replace b3() with nil"), 0)
+end
+
+function TestScanner:testKeepsCallToNilInWhileBodyCondition()
+  local result = analyze("while f() do b() end\n")
+  lu.assertEquals(count_sites(result, "replace f() with nil"), 1)
+  lu.assertEquals(count_sites(result, "replace b() with nil"), 0)
+end
+
+function TestScanner:testKeepsFornumBoundAndRepeatConditionSites()
+  local result = analyze("for i = 1, 10 do b() end\nrepeat r() until c == 1\n")
+  lu.assertEquals(count_sites(result, "replace 1 with 0"), 2)
+  lu.assertEquals(count_sites(result, "replace == with ~="), 1)
+  lu.assertEquals(count_sites(result, "replace r() with nil"), 0)
+  lu.assertEquals(count_sites(result, "replace b() with nil"), 0)
+end
+
+function TestScanner:testKeepsForinIteratorExpressionSites()
+  local result = analyze("for k, v in pairs(t) do b() end\n")
+  lu.assertEquals(count_sites(result, "replace pairs(t) with nil"), 1)
+  lu.assertEquals(count_sites(result, "replace b() with nil"), 0)
+end
+
+-- chained calls: nil cannot be indexed or called, so those Call→nil sites
+-- would be syntax-error mutants and are suppressed.
+
+function TestScanner:testSkipsCallToNilWhenResultIsIndexed()
+  local result = analyze("local push = require(\"x\").push\nreturn push\n")
+  lu.assertEquals(count_sites(result, "replace require(\"x\") with nil"), 0)
+end
+
+function TestScanner:testSkipsCallToNilWhenResultIsMethodCalled()
+  local result = analyze("local v = f():g()\nreturn v\n")
+  lu.assertEquals(count_sites(result, "replace f() with nil"), 0)
+end
+
+function TestScanner:testSkipsCallToNilWhenResultIsCalled()
+  local result = analyze("local v = f()(1)\nreturn v\n")
+  lu.assertEquals(count_sites(result, "replace f() with nil"), 0)
+end
+
+function TestScanner:testKeepsCallToNilAsIndexKey()
+  local result = analyze("local v = a[f()]\nreturn v\n")
+  lu.assertEquals(count_sites(result, "replace f() with nil"), 1)
+end
+
+-- call-sugar strings: `f "x"` shares the AST shape of `f("x")`, but splicing
+-- nil there yields `f nil`, which is not valid Lua.
+
+function TestScanner:testSkipsStringToNilInCallSugarForm()
+  local result = analyze("require \"src.rules.endgame\"\n")
+  lu.assertEquals(count_sites(result, "replace src.rules.endgame with nil"), 0)
+end
+
+function TestScanner:testKeepsStringToNilInParenthesizedCall()
+  local result = analyze("require(\"src.rules.endgame\")\n")
+  lu.assertEquals(count_sites(result, "replace src.rules.endgame with nil"), 1)
+end
+
+function TestScanner:testSkipsStringToNilInMethodCallSugarForm()
+  local result = analyze("a:b \"x\"\n")
+  lu.assertEquals(count_sites(result, "replace x with nil"), 0)
+end
+
 return TestScanner

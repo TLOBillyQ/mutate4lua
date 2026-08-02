@@ -173,11 +173,36 @@ local function add_site(sites, scopes, source, node, replacement, description, s
   }
 end
 
+-- Detect call-sugar form `f "x"` / `a:b "x"`: the AST shape is identical to
+-- the parenthesized call, but splicing nil for the string yields `f nil`,
+-- which is not valid Lua (sugar accepts only string/table literals). The
+-- forms are told apart by the absence of "(" between callee and argument.
+local function is_call_sugar_string(source, parent, node)
+  if type(parent) ~= "table" then
+    return false
+  end
+  local callee
+  if parent.tag == "Call" and parent[2] == node then
+    callee = parent[1]
+  elseif parent.tag == "Invoke" and parent[3] == node then
+    callee = parent[2]
+  else
+    return false
+  end
+  if type(callee) ~= "table" then
+    return false
+  end
+  local between = source:sub(callee.end_offset + 1, node.offset - 1)
+  return not between:find("(", 1, true)
+end
+
 -- Walk the AST for mutation sites.
 -- `in_expr` tracks whether the current node is in expression context:
 --   false → direct child of a statement list (chunk / block body)
 --   true  → child of an expression-bearing slot
-local function walk_mutations(node, in_expr, sites, scopes, source)
+-- `parent` is the immediate parent node, used to suppress Call→nil sites
+-- whose nil would be indexed or called (a syntax error, not a mutant).
+local function walk_mutations(node, in_expr, sites, scopes, source, parent)
   if type(node) ~= "table" then
     return
   end
@@ -199,7 +224,19 @@ local function walk_mutations(node, in_expr, sites, scopes, source)
       add_site(sites, scopes, source, node, "0", "replace 1 with 0")
     end
   elseif tag == "String" then
-    add_site(sites, scopes, source, node, "nil", "replace " .. (node[1] or "") .. " with nil")
+    -- luacheck reuses the String tag for dot-syntax index keys (`a.b`),
+    -- method names (`a:b()`), and bare table-constructor keys (`{k = v}`);
+    -- those spans hold a bare identifier and splicing nil there yields a
+    -- syntax-error mutant that any suite trivially kills. Only genuine
+    -- literals (span starts with a quote or long-bracket) are mutated;
+    -- bracket-form keys (`a["b"]`, `{["k"] = v}`) keep their quotes in the
+    -- span and stay valid mutation targets.
+    local first = source:sub(node.offset, node.offset)
+    if (first == '"' or first == "'" or first == "[")
+      and not is_call_sugar_string(source, parent, node)
+    then
+      add_site(sites, scopes, source, node, "nil", "replace " .. (node[1] or "") .. " with nil")
+    end
 
   -- Operator mutations
   elseif tag == "Op" then
@@ -225,21 +262,29 @@ local function walk_mutations(node, in_expr, sites, scopes, source)
       end
     end
 
-  -- Call expression → nil (expression position only)
+  -- Call expression → nil (expression position only). Skipped when the call
+  -- result is immediately indexed, method-called, or called again: replacing
+  -- the call with nil there produces `nil.x` / `nil:m()` / `nil()` — a
+  -- syntax-error mutant any suite trivially kills, not a real mutant.
   elseif tag == "Call" and in_expr then
-    local scope = assign_scope(scopes, node.offset, node.end_offset)
-    local original_text = source:sub(node.offset, node.end_offset)
-    sites[#sites + 1] = {
-      file = scope.file,
-      relative_file = scope.relative_file,
-      line = node.line or 0,
-      start_pos = node.offset,
-      end_pos = node.end_offset,
-      original_text = original_text,
-      replacement_text = "nil",
-      description = "replace " .. original_text .. " with nil",
-      scope_id = scope.id,
-    }
+    local chained = type(parent) == "table"
+      and (parent.tag == "Index" or parent.tag == "Invoke" or parent.tag == "Call")
+      and parent[1] == node
+    if not chained then
+      local scope = assign_scope(scopes, node.offset, node.end_offset)
+      local original_text = source:sub(node.offset, node.end_offset)
+      sites[#sites + 1] = {
+        file = scope.file,
+        relative_file = scope.relative_file,
+        line = node.line or 0,
+        start_pos = node.offset,
+        end_pos = node.end_offset,
+        original_text = original_text,
+        replacement_text = "nil",
+        description = "replace " .. original_text .. " with nil",
+        scope_id = scope.id,
+      }
+    end
   end
 
   -- Recurse into children with context-sensitive `in_expr`.
@@ -249,7 +294,7 @@ local function walk_mutations(node, in_expr, sites, scopes, source)
     -- lists (inside Local, Set, Return, etc.) are entered from
     -- `in_expr=true`.
     for _, child in ipairs(node) do
-      walk_mutations(child, in_expr, sites, scopes, source)
+      walk_mutations(child, in_expr, sites, scopes, source, node)
     end
     return
   end
@@ -262,27 +307,25 @@ local function walk_mutations(node, in_expr, sites, scopes, source)
 
     local child_expr = true
 
-    if tag == "Function" then
-      -- [1] = params (expr), [2+] = body (stmt-list)
-      if i == 2 then
+    -- Statement-list bodies are always tagless arrays; conditions and
+    -- sub-expressions are tagged nodes. (If without this rule misclassified
+    -- else blocks — they sit at an odd last index — as expression context,
+    -- and Fornum/Repeat wrongly suppressed their bound/condition sites.)
+    if tag == "Function" or tag == "If" or tag == "While"
+      or tag == "Fornum" or tag == "Repeat" or tag == "Do"
+    then
+      if child.tag == nil then
         child_expr = false
       end
-    elseif tag == "If" then
-      -- even-indexed children are blocks; odd are conditions
-      if i % 2 == 0 then
+    elseif tag == "Forin" then
+      -- [1] = vars, [2] = iterator exprs, [3] = body (stmt-list, last child);
+      -- all three are tagless arrays, so position decides.
+      if i == #node then
         child_expr = false
       end
-    elseif tag == "While" or tag == "Fornum" or tag == "Forin" or tag == "Repeat" then
-      -- [1] = condition/expr, [2+] = body (stmt-list)
-      if i >= 2 then
-        child_expr = false
-      end
-    elseif tag == "Do" then
-      -- [1] = body (stmt-list)
-      child_expr = false
     end
 
-    walk_mutations(child, child_expr, sites, scopes, source)
+    walk_mutations(child, child_expr, sites, scopes, source, node)
 
     ::continue_child::
   end
