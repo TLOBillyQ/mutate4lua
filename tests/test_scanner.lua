@@ -170,4 +170,115 @@ function TestScanner:testAssignsTopLevelSitesToChunkScopeId()
   lu.assertTrue(found, "expected a numeric-literal site")
 end
 
+-- multi-byte (UTF-8) offset handling: luacheck's decoder switches to
+-- codepoint indexing when the source contains multi-byte characters;
+-- scanner must expose byte offsets so apply_mutation splices correctly.
+
+local function find_site(result, description)
+  for _, site in ipairs(result.sites) do
+    if site.description == description then return site end
+  end
+  return nil
+end
+
+function TestScanner:testAsciiSourceSitePositionsAreByteOffsets()
+  local source = "local x = 1 == 2\nreturn x\n"
+  local site = find_site(analyze(source), "replace == with ~=")
+  lu.assertNotNil(site)
+  local byte_start, byte_end = source:find("==", 1, true)
+  lu.assertEquals(site.start_pos, byte_start)
+  lu.assertEquals(site.end_pos, byte_end)
+  lu.assertEquals(site.original_text, "==")
+end
+
+function TestScanner:testSitePositionsAreByteOffsetsWithMultibyteCommentBeforeSite()
+  local source = "-- 中文注释\nlocal x = 1 == 2\nreturn x\n"
+  local site = find_site(analyze(source), "replace == with ~=")
+  lu.assertNotNil(site)
+  local byte_start, byte_end = source:find("==", 1, true)
+  lu.assertEquals(site.start_pos, byte_start)
+  lu.assertEquals(site.end_pos, byte_end)
+  lu.assertEquals(site.original_text, "==")
+end
+
+function TestScanner:testSitePositionsAreByteOffsetsWithMultibyteStringBeforeSite()
+  local source = "local s = \"道具\"\nlocal x = true\nreturn x\n"
+  local site = find_site(analyze(source), "replace true with false")
+  lu.assertNotNil(site)
+  local byte_start, byte_end = source:find("true", 1, true)
+  lu.assertEquals(site.start_pos, byte_start)
+  lu.assertEquals(site.end_pos, byte_end)
+  lu.assertEquals(site.original_text, "true")
+end
+
+function TestScanner:testApplyMutationSplicesAtByteOffsetsInMultibyteSource()
+  local source = "-- 中文注释\nlocal x = 1 == 2\nreturn x\n"
+  local site = find_site(analyze(source), "replace == with ~=")
+  local mutated = scanner.apply_mutation(source, site)
+  lu.assertEquals(mutated, "-- 中文注释\nlocal x = 1 ~= 2\nreturn x\n")
+  lu.assertNotNil(load(mutated))
+end
+
+function TestScanner:testFunctionScopePositionsAreByteOffsetsWithMultibyteContent()
+  local source = "-- 注释\nlocal function f()\n  return 1\nend\nreturn f\n"
+  local scope = find_scope(analyze(source), "function:f")
+  lu.assertNotNil(scope)
+  lu.assertEquals(source:sub(scope.start_pos, scope.end_pos), "function f()\n  return 1\nend")
+end
+
+-- operator site spans: luacheck's Op node covers the whole operation
+-- expression, but the mutation must splice only the operator token itself
+-- (regression guard: expression-span splices produce syntax-error mutants
+-- that any test suite trivially "kills").
+
+function TestScanner:testUnaryNotSiteSpansOnlyTheKeyword()
+  local source = "local x = not y\nreturn x\n"
+  local site = find_site(analyze(source), "replace not with removed not")
+  lu.assertNotNil(site)
+  lu.assertEquals(site.original_text, "not")
+  local mutated = scanner.apply_mutation(source, site)
+  lu.assertEquals(mutated, "local x =  y\nreturn x\n")
+  lu.assertNotNil(load(mutated))
+end
+
+function TestScanner:testUnaryMinusSiteSpansOnlyTheMinusSign()
+  local source = "local x = -y\nreturn x\n"
+  local site = find_site(analyze(source), "replace - with removed -")
+  lu.assertNotNil(site)
+  lu.assertEquals(site.original_text, "-")
+  local mutated = scanner.apply_mutation(source, site)
+  lu.assertEquals(mutated, "local x = y\nreturn x\n")
+  lu.assertNotNil(load(mutated))
+end
+
+function TestScanner:testBinaryOperatorSiteIgnoresCommentLookalikesInGap()
+  local source = "local x = a --[[n-1]] - b\nreturn x\n"
+  local site = find_site(analyze(source), "replace - with +")
+  lu.assertNotNil(site)
+  lu.assertEquals(site.original_text, "-")
+  local mutated = scanner.apply_mutation(source, site)
+  lu.assertEquals(mutated, "local x = a --[[n-1]] + b\nreturn x\n")
+  lu.assertNotNil(load(mutated))
+end
+
+function TestScanner:testWordOperatorSiteSpansOnlyTheKeyword()
+  local source = "local x = a and b\nreturn x\n"
+  local site = find_site(analyze(source), "replace and with or")
+  lu.assertNotNil(site)
+  lu.assertEquals(site.original_text, "and")
+  local mutated = scanner.apply_mutation(source, site)
+  lu.assertEquals(mutated, "local x = a or b\nreturn x\n")
+  lu.assertNotNil(load(mutated))
+end
+
+function TestScanner:testBinaryOperatorSiteWithMultibyteCommentBeforeSite()
+  local source = "-- 注释\nlocal x = a + b\nreturn x\n"
+  local site = find_site(analyze(source), "replace + with -")
+  lu.assertNotNil(site)
+  lu.assertEquals(site.original_text, "+")
+  local mutated = scanner.apply_mutation(source, site)
+  lu.assertEquals(mutated, "-- 注释\nlocal x = a - b\nreturn x\n")
+  lu.assertNotNil(load(mutated))
+end
+
 return TestScanner

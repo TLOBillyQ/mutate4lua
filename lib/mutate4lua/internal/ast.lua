@@ -10,13 +10,59 @@ if not ok_decoder or not ok_parser then
   error("luacheck required: luarocks install luacheck", 0)
 end
 
+-- luacheck's decoder is Unicode-aware: when the source contains multi-byte
+-- UTF-8 (e.g. Chinese comments/strings), parser node offsets (offset,
+-- end_offset, and nested end_range) are codepoint indices, not byte indices.
+-- Downstream splicing uses string.sub byte semantics, so convert every offset
+-- in the parsed AST to byte offsets right at this boundary.
+local function build_codepoint_byte_map(source)
+  local map = {}
+  local codepoint = 0
+  for i = 1, #source do
+    local b = source:byte(i)
+    -- UTF-8 lead bytes are ASCII (< 0x80) or >= 0xC0; 0x80..0xBF are
+    -- continuation bytes. The decoder already validated the source, so no
+    -- malformed sequences reach this map.
+    if b < 0x80 or b >= 0xC0 then
+      codepoint = codepoint + 1
+      map[codepoint] = i
+    end
+  end
+  map[codepoint + 1] = #source + 1
+  return map
+end
+
+local function convert_offsets_to_bytes(node, map)
+  if type(node) ~= "table" then
+    return
+  end
+  local offset, end_offset = node.offset, node.end_offset
+  if type(offset) == "number" and type(end_offset) == "number"
+    and map[offset] and map[end_offset + 1]
+  then
+    -- end_offset is an inclusive codepoint index; the inclusive byte index is
+    -- one byte before the start of the next codepoint.
+    node.offset = map[offset]
+    node.end_offset = map[end_offset + 1] - 1
+  end
+  for _, child in pairs(node) do
+    convert_offsets_to_bytes(child, map)
+  end
+end
+
 function ast.parse_source(source)
-  local ok, parsed = pcall(parser.parse, decoder.decode(source))
+  local chars = decoder.decode(source)
+  local ok, parsed = pcall(parser.parse, chars)
   if not ok then
     return nil, tostring(parsed)
   end
   if not parsed then
     return nil, "parse error"
+  end
+  -- LatinChars (pure-ASCII or undecodable bytes) already indexes by bytes;
+  -- only UnicodeChars needs the conversion.
+  if chars:get_length() ~= #source then
+    convert_offsets_to_bytes(parsed, build_codepoint_byte_map(source))
   end
   return parsed
 end

@@ -19,6 +19,60 @@ local binary_replacements = {
   ["or"] = {replacement = "and", description = "replace or with and"},
 }
 
+-- operator tag → source lexeme, used to locate the operator token inside an
+-- Op node. luacheck's Op node spans the whole operation expression (operands
+-- included), so node.offset/end_offset cannot be spliced directly.
+local operator_lexemes = {
+  ["eq"] = "==", ["ne"] = "~=", ["lt"] = "<", ["le"] = "<=",
+  ["gt"] = ">", ["ge"] = ">=", ["add"] = "+", ["sub"] = "-",
+  ["mul"] = "*", ["div"] = "/", ["and"] = "and", ["or"] = "or",
+  ["not"] = "not", ["unm"] = "-",
+}
+
+-- Blank out Lua comments in a source slice, preserving byte positions, so a
+-- plain find cannot land on operator lookalikes inside comments (e.g. the
+-- dashes of a long-comment opener sitting before a binary "-").
+local function blank_comments(text)
+  text = text:gsub("%-%-%[=*%[.-%]%=*%]", function(comment)
+    return (" "):rep(#comment)
+  end)
+  text = text:gsub("%-%-[^\n]*", function(comment)
+    return (" "):rep(#comment)
+  end)
+  return text
+end
+
+-- Locate the operator token of an Op node (byte offsets, inclusive).
+-- Unary prefix operators sit at the node start; binary operators sit in the
+-- gap between the two operands. Besides whitespace the gap can only contain
+-- comments, so after blanking comments the first remaining occurrence of the
+-- lexeme is the operator token.
+local function operator_range(source, node)
+  local op = node[1]
+  local lexeme = operator_lexemes[op]
+  if not lexeme then
+    return nil, nil
+  end
+  if op == "not" or op == "unm" then
+    return node.offset, node.offset + #lexeme - 1
+  end
+  local left, right = node[2], node[3]
+  if type(left) ~= "table" or type(right) ~= "table" then
+    return nil, nil
+  end
+  local gap_start = left.end_offset + 1
+  local gap_end = right.offset - 1
+  if gap_end < gap_start then
+    return nil, nil
+  end
+  local gap = blank_comments(source:sub(gap_start, gap_end))
+  local token_start, token_end = gap:find(lexeme, 1, true)
+  if not token_start then
+    return nil, nil
+  end
+  return gap_start + token_start - 1, gap_start + token_end - 1
+end
+
 local function line_count(text)
   local count = 1
   local index = 1
@@ -102,15 +156,17 @@ local function assign_scope(scopes, start_pos, end_pos)
   return winner
 end
 
-local function add_site(sites, scopes, source, node, replacement, description)
-  local scope = assign_scope(scopes, node.offset, node.end_offset)
+local function add_site(sites, scopes, source, node, replacement, description, start_pos, end_pos)
+  start_pos = start_pos or node.offset
+  end_pos = end_pos or node.end_offset
+  local scope = assign_scope(scopes, start_pos, end_pos)
   sites[#sites + 1] = {
     file = scope.file,
     relative_file = scope.relative_file,
     line = node.line or 0,
-    start_pos = node.offset,
-    end_pos = node.end_offset,
-    original_text = source:sub(node.offset, node.end_offset),
+    start_pos = start_pos,
+    end_pos = end_pos,
+    original_text = source:sub(start_pos, end_pos),
     replacement_text = replacement,
     description = description,
     scope_id = scope.id,
@@ -149,14 +205,23 @@ local function walk_mutations(node, in_expr, sites, scopes, source)
   elseif tag == "Op" then
     local op = node[1]
     if op == "not" then
-      add_site(sites, scopes, source, node, "", "replace not with removed not")
+      local op_start, op_end = operator_range(source, node)
+      if op_start then
+        add_site(sites, scopes, source, node, "", "replace not with removed not", op_start, op_end)
+      end
     elseif op == "unm" then
       -- unary minus: no disambiguation needed (binary minus is "sub")
-      add_site(sites, scopes, source, node, "", "replace - with removed -")
+      local op_start, op_end = operator_range(source, node)
+      if op_start then
+        add_site(sites, scopes, source, node, "", "replace - with removed -", op_start, op_end)
+      end
     else
       local mapping = binary_replacements[op]
       if mapping then
-        add_site(sites, scopes, source, node, mapping.replacement, mapping.description)
+        local op_start, op_end = operator_range(source, node)
+        if op_start then
+          add_site(sites, scopes, source, node, mapping.replacement, mapping.description, op_start, op_end)
+        end
       end
     end
 
