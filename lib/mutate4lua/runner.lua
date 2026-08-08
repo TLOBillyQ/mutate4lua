@@ -7,6 +7,14 @@
 --   lua runner.lua [--root DIR] [--coverage-report PATH | --no-coverage]
 --                  [--fail-fast] [--quiet] [test-file ...]
 --   lua runner.lua --serve DIR
+--   lua runner.lua --attribution-matrix PATH --attribution-target REL [--root DIR]
+--
+-- Attribution-matrix mode (map #1, #7/#12): one coverage pass that records
+-- which test file covered which line of the target source file, instead of
+-- luacov's process-wide aggregate. Test files run one at a time and luacov's
+-- public `runner.data` table is snapshotted and cleared at each boundary, so
+-- every test file's hits stay attributable to it. No luacov report is written;
+-- the matrix is dumped to PATH as a loadable Lua table.
 --
 -- Serve mode (ADR-0007): the runner stays resident as one worker per parallel
 -- slot. It waits for job-<n>.req files in DIR (a loadable Lua table carrying
@@ -40,6 +48,18 @@ local function parse_args(argv)
         error("--serve requires a value")
       end
       args.serve = argv[index]
+    elseif token == "--attribution-matrix" then
+      index = index + 1
+      if argv[index] == nil then
+        error("--attribution-matrix requires a value")
+      end
+      args.attribution_matrix = argv[index]
+    elseif token == "--attribution-target" then
+      index = index + 1
+      if argv[index] == nil then
+        error("--attribution-target requires a value")
+      end
+      args.attribution_target = argv[index]
     elseif token == "--root" then
       index = index + 1
       if argv[index] == nil then
@@ -67,6 +87,16 @@ local function parse_args(argv)
   end
   if args.coverage_report and args.no_coverage then
     error("--coverage-report and --no-coverage are mutually exclusive")
+  end
+  if args.attribution_matrix then
+    if args.coverage_report then
+      error("--attribution-matrix and --coverage-report are mutually exclusive")
+    end
+    if args.attribution_target == nil then
+      error("--attribution-matrix requires --attribution-target")
+    end
+  elseif args.attribution_target then
+    error("--attribution-target requires --attribution-matrix")
   end
   if not args.coverage_report and not args.no_coverage then
     -- Direct human invocations (e.g. lua tests/run.lua) default to no coverage;
@@ -342,7 +372,258 @@ local function execute_pass(args, cache)
   return failures
 end
 
+-- ---- attribution matrix mode (map #1, #12) ----
+
+-- luacov's include/exclude patterns are Lua patterns matched against the file
+-- name with the .lua suffix stripped and separators normalized to "/", so a
+-- path used as a pattern must have its magic characters escaped.
+local function escape_lua_pattern(text)
+  return (tostring(text):gsub("[%^%$%(%)%%%.%[%]%*%+%-%?]", "%%%1"))
+end
+
+local function normalize_slashes(path)
+  return (tostring(path or ""):gsub("\\", "/"))
+end
+
+-- The keys of luacov's data table are the source names debug.getinfo reports,
+-- i.e. the paths files were loaded through: absolute for anything the runner
+-- loads. Match the target by path suffix so an absolute key and a
+-- root-relative target still meet.
+local function find_target_data(data, target_relative)
+  local suffix = normalize_slashes(target_relative):gsub("^%./", "")
+  for name, file_data in pairs(data) do
+    local candidate = normalize_slashes(name)
+    if candidate == suffix or candidate:sub(-(#suffix + 1)) == "/" .. suffix then
+      return file_data
+    end
+  end
+  return nil
+end
+
+-- Executed lines of one luacov per-file entry, sorted. `max`/`max_hits` are
+-- string keys of the same table and are skipped.
+local function executed_lines(file_data)
+  local lines = {}
+  if type(file_data) ~= "table" then return lines end
+  for key, hits in pairs(file_data) do
+    if type(key) == "number" and type(hits) == "number" and hits > 0 then
+      lines[#lines + 1] = key
+    end
+  end
+  table.sort(lines)
+  return lines
+end
+
+local function write_matrix(path, target_relative, load_lines, load_lines_known, files, order, failing)
+  local out = {"return {\n"}
+  out[#out + 1] = "  target = " .. string.format("%q", target_relative) .. ",\n"
+  out[#out + 1] = "  load_lines_known = " .. tostring(load_lines_known and true or false) .. ",\n"
+  out[#out + 1] = "  load_lines = {" .. table.concat(load_lines, ", ") .. "},\n"
+  -- Test files that failed during the build: their rows may be incomplete, so
+  -- the engine treats them as unreliable rather than trusting a short row.
+  out[#out + 1] = "  failing_files = {\n"
+  for _, name in ipairs(failing or {}) do
+    out[#out + 1] = "    " .. string.format("%q", name) .. ",\n"
+  end
+  out[#out + 1] = "  },\n"
+  out[#out + 1] = "  files = {\n"
+  for _, name in ipairs(order) do
+    local lines = files[name]
+    if lines and #lines > 0 then
+      out[#out + 1] = "    [" .. string.format("%q", name) .. "] = {"
+        .. table.concat(lines, ", ") .. "},\n"
+    end
+  end
+  out[#out + 1] = "  },\n}\n"
+  local handle, open_err = io.open(path, "w")
+  if handle == nil then
+    return nil, "cannot write attribution matrix " .. path .. ": " .. tostring(open_err)
+  end
+  handle:write(table.concat(out))
+  handle:close()
+  return true
+end
+
+-- One coverage pass that stays attributable per test file: every test file runs
+-- on its own, with luacov's public `runner.data` cleared at the boundary, so
+-- the lines it recorded belong to that file alone.
+--
+-- Deliberately NOT reloading modules between files: the mutant runs this
+-- matrix prunes for share one process too, so keeping the same ordering and
+-- module-caching semantics is what makes the attribution match what a mutant
+-- run would execute.
+--
+-- Load-phase lines are collected separately from test-execution lines, because
+-- anything the target executes while modules are being loaded runs only once
+-- per process — on whichever test file happens to load that module first. Its
+-- effect (a computed constant, a table built at load time) then propagates to
+-- every test using the module, so per-file attribution cannot name the killers
+-- of a mutation there. Two sources feed this set:
+--   * the target's own load-time lines (it is required once), and
+--   * lines the target runs while a test file's require chain loads host
+--     modules (measured per test file, since the first loader varies).
+-- Both are recorded as load lines so the engine falls back to the full suite
+-- for those sites (空集回退): over-running is correct, under-running would
+-- drift the kill set. Verified necessary on the monopoly benchmark, where 168
+-- such lines across a 16-file sample were otherwise credited to a single test.
+local function build_attribution_matrix(args)
+  local root = absolute_path(args.root)
+  set_package_path(root)
+
+  local ok_lu, lu = pcall(require, "luaunit")
+  if not ok_lu then
+    return nil, "error: luaunit is required but is not installed (luarocks install luaunit)"
+  end
+  local ok_cov, luacov_runner = pcall(require, "luacov.runner")
+  if not ok_cov then
+    return nil, "error: luacov is required for the attribution matrix but is not installed"
+  end
+
+  local target_relative = normalize_slashes(args.attribution_target):gsub("^%./", "")
+  local target_absolute = is_absolute(target_relative) and target_relative
+    or (root .. "/" .. target_relative)
+
+  local files = args.files
+  if #files == 0 then
+    files = discover_test_files(root)
+  end
+  if #files == 0 then
+    return nil, "No test files found."
+  end
+
+  -- Instrumentation narrowed to the target: the matrix only ever consumes the
+  -- target's lines, and every other file's per-line bookkeeping would be
+  -- recorded and thrown away. Stats/report output is suppressed — this mode
+  -- produces the matrix, not a luacov report.
+  local stats_path = os.tmpname()
+  os.remove(stats_path)
+  luacov_runner.init({
+    statsfile = stats_path,
+    runreport = false,
+    include = {escape_lua_pattern((target_relative:gsub("%.lua$", "")))},
+  })
+
+  -- Load-time lines: run the target chunk standalone under the hook. The call
+  -- does not register the module in package.loaded, so the suite still loads it
+  -- through require exactly as it would otherwise.
+  local load_lines, load_lines_known = {}, false
+  local target_chunk = loadfile(target_absolute)
+  if target_chunk == nil then
+    io.stderr:write("mutate4lua runner: cannot load target ", target_absolute,
+      " for load-time attribution; sites on load-time lines will fall back to the full suite\n")
+  else
+    luacov_runner.data = {}
+    local chunk_ok, chunk_err = pcall(target_chunk)
+    if chunk_ok then
+      load_lines = executed_lines(find_target_data(luacov_runner.data, target_relative))
+      load_lines_known = true
+    else
+      io.stderr:write("mutate4lua runner: target ", target_relative,
+        " raised while loading standalone (", tostring(chunk_err),
+        "); load-time lines unknown\n")
+    end
+  end
+
+  if args.quiet then
+    lu.LuaUnit.verbosity = lu.VERBOSITY_QUIET
+  end
+
+  local load_line_set = {}
+  for _, line in ipairs(load_lines) do
+    load_line_set[line] = true
+  end
+
+  local matrix, order, failures, failing = {}, {}, 0, {}
+  for _, file in ipairs(files) do
+    local relative = normalize_slashes(file)
+    if relative:sub(1, #root + 1) == root .. "/" then
+      relative = relative:sub(#root + 2)
+    end
+    order[#order + 1] = relative
+
+    -- Load phase: loading the test file pulls its require chain, and any target
+    -- line executed here belongs to module load, not to this file's tests.
+    luacov_runner.data = {}
+    local load_ok, instance_or_err = pcall(load_suite, file, nil)
+    for _, line in ipairs(executed_lines(find_target_data(luacov_runner.data, target_relative))) do
+      load_line_set[line] = true
+    end
+
+    -- Run phase: cleared again so the row holds only what the tests executed.
+    luacov_runner.data = {}
+    if load_ok then
+      -- A test calling os.exit (or luaunit aborting) must not take the matrix
+      -- build down with it: trap the exit, treat the file as finished, and
+      -- keep whatever lines it did record.
+      local real_exit = os.exit
+      os.exit = function(_) error({}, 0) end
+      local runner = lu.LuaUnit.new()
+      local run_ok, result = pcall(runner.runSuiteByInstancesNoCmdLineParsing, runner, {instance_or_err})
+      os.exit = real_exit
+      local file_failures
+      if run_ok then
+        file_failures = tonumber(result) or 0
+      else
+        runner:unregisterSuite()
+        file_failures = 1
+      end
+      failures = failures + file_failures
+      -- A test that fails here may not have executed the lines it normally
+      -- would, so its attribution can be incomplete. Name the files instead of
+      -- only counting them: an incomplete row is a matrix-quality problem, and
+      -- silently under-attributing a line would shrink a prune set.
+      if file_failures > 0 then
+        failing[#failing + 1] = relative
+      end
+    else
+      io.stderr:write("mutate4lua runner: cannot load test file ", tostring(file), ": ",
+        tostring(instance_or_err), "\n")
+      failures = failures + 1
+      failing[#failing + 1] = relative
+    end
+    matrix[relative] = executed_lines(find_target_data(luacov_runner.data, target_relative))
+  end
+
+  luacov_runner.data = {}
+  debug.sethook()
+
+  local all_load_lines = {}
+  for line in pairs(load_line_set) do
+    all_load_lines[#all_load_lines + 1] = line
+  end
+  table.sort(all_load_lines)
+
+  local written, write_err = write_matrix(args.attribution_matrix, target_relative,
+    all_load_lines, load_lines_known, matrix, order, failing)
+  os.remove(stats_path)
+  if not written then
+    return nil, write_err
+  end
+  return failures, nil, failing
+end
+
 local function run(args)
+  if args.attribution_matrix then
+    local failures, err, failing = build_attribution_matrix(args)
+    if failures == nil then
+      io.stderr:write(tostring(err), "\n")
+      return 1
+    end
+    -- A failing test still attributes the lines it executed, so the matrix is
+    -- written either way; suite health is the baseline run's job to police.
+    -- The failing files are named because a file failing here (typically one
+    -- that only passes as part of the full suite) has a possibly incomplete
+    -- row, which the engine must not treat as a complete prune set.
+    if failures > 0 then
+      io.stderr:write("warning: ", tostring(failures),
+        " test failure(s) in ", tostring(#failing),
+        " file(s) during attribution matrix build\n")
+      for _, name in ipairs(failing) do
+        io.stderr:write("  failing: ", name, "\n")
+      end
+    end
+    return 0
+  end
   local failures, err = execute_pass(args, nil)
   if failures == nil then
     io.stderr:write(tostring(err), "\n")

@@ -20,5 +20,8 @@ Icon
 ### 构建/测试产物
 luacov.stats.out
 
+### 归因矩阵缓存（宿主项目侧同样需要忽略）
+.mutate4lua/
+
 ### 会话工作区（地图资产、诊断草稿，见 tracker 决议）
 .scratch/

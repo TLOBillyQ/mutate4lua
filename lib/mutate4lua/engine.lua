@@ -4,6 +4,7 @@ local project = require("mutate4lua.internal.project")
 local parallel = require("mutate4lua.internal.parallel")
 local resident = require("mutate4lua.internal.resident")
 local overlay = require("mutate4lua.internal.overlay")
+local attribution = require("mutate4lua.internal.attribution")
 local util = require("mutate4lua.util")
 
 local engine = {}
@@ -376,6 +377,96 @@ local function _build_runner_command(coverage_report_path, fail_fast)
   return _shell_join(parts)
 end
 
+local function _build_attribution_command(matrix_path, target_relative)
+  return _shell_join({
+    "lua", _runner_script_path(),
+    "--attribution-matrix", matrix_path,
+    "--attribution-target", target_relative,
+    "--quiet",
+  })
+end
+
+-- Makes a fresh attribution matrix available for `relative`, building it when
+-- the cache is missing or stale (map #1, #12). The matrix is what test
+-- subsetting prunes with; building it is a one-time prep step (暖缓存计线),
+-- so it is triggered from the normal mutate flow rather than a new CLI flag.
+--
+-- The build runs inside the workspace (same tree the mutants will run in) but
+-- writes the cache under the project root: the workspace is an overlay that
+-- gets removed after the run, so a cache written there would never be reused.
+--
+-- Returns the matrix, or nil plus a reason. A failure is never fatal: without a
+-- matrix the engine runs the full suite for every mutant, which is exactly the
+-- pre-subsetting behaviour.
+local function _ensure_attribution_matrix(scan_ctx, workspace, run_shell, stdout, stderr)
+  local project_root = scan_ctx.project_root
+  local relative = scan_ctx.relative
+
+  local test_files = attribution.discover_test_files(project_root)
+  if #test_files == 0 then
+    return nil, "no test files discovered"
+  end
+  local suite_hash, hash_err = attribution.suite_hash(project_root, test_files)
+  if suite_hash == nil then
+    return nil, hash_err
+  end
+  local target_hash = attribution.target_hash(scan_ctx.stripped)
+
+  local cached = attribution.load(project_root, relative)
+  if attribution.is_fresh(cached, suite_hash, target_hash) then
+    return cached
+  end
+
+  stdout:write("attribution matrix: building (", tostring(#test_files), " test files)...\n")
+  local matrix_path = attribution.cache_path(project_root, relative)
+  local parent = util.parent_dir(matrix_path)
+  if parent and parent ~= "" then
+    util.mkdir_p(parent)
+  end
+
+  local started = os.time()
+  local result = run_shell(_build_attribution_command(matrix_path, relative), workspace, nil)
+  local elapsed = os.difftime(os.time(), started)
+  if not result.ok then
+    stderr:write("warning: attribution matrix build failed (exit ", tostring(result.code),
+      "); falling back to the full test suite\n")
+    if result.output ~= "" then stderr:write(result.output, "\n") end
+    return nil, "build failed"
+  end
+
+  local built = attribution.decode(util.read_file(matrix_path) or "")
+  if built == nil then
+    stderr:write("warning: attribution matrix build produced no usable matrix; ",
+      "falling back to the full test suite\n")
+    return nil, "unreadable matrix"
+  end
+
+  -- Stamp the freshness key on the built matrix and rewrite it through the
+  -- module's own encoder, so the cache on disk is always in the canonical form
+  -- `attribution.load` validates.
+  built.version = attribution.CURRENT_MATRIX_VERSION
+  built.target = relative
+  built.suite_hash = suite_hash
+  built.target_hash = target_hash
+  local saved, save_err = attribution.save(project_root, relative, built)
+  if not saved then
+    stderr:write("warning: cannot write attribution matrix cache: ", tostring(save_err), "\n")
+  end
+
+  stdout:write("attribution matrix: ", tostring(attribution.file_count(built)),
+    " test files attributed in ", tostring(elapsed), "s\n")
+  if not built.load_lines_known then
+    stderr:write("warning: attribution matrix could not determine the target's load-time lines; ",
+      "every site falls back to the full test suite\n")
+  end
+  if #built.failing_files > 0 then
+    stderr:write("warning: ", tostring(#built.failing_files),
+      " test file(s) failed during the attribution matrix build; ",
+      "their coverage rows may be incomplete\n")
+  end
+  return built
+end
+
 local function _scan_target(workspace_root, target)
   local abs_target
   if _is_absolute_path(target) then
@@ -689,6 +780,18 @@ function engine.mutate(options, env)
 
   local timeout = math.max(5, (baseline.elapsed + 1) * timeout_factor)
   stdout:write("baseline: ", tostring(baseline.elapsed), "s (timeout: ", tostring(math.ceil(timeout)), "s)\n")
+
+  -- Attribution matrix prep (map #1, #12). Built here so it is available in
+  -- every mode that runs the built-in runner — including --mutate-all, which
+  -- does not run coverage at all and would otherwise have no matrix. The
+  -- --test-command escape hatch has no runner to build it with.
+  --
+  -- The matrix is prepared but not yet consumed: pruning the per-mutant suite
+  -- with it (attribution.index / files_for_line) is the engine-wiring ticket's
+  -- (#13) job.
+  if not options.test_command then
+    _ensure_attribution_matrix(scan_ctx, workspace, run_shell, stdout, stderr)
+  end
 
   local function _mutant_command()
     if options.test_command then
