@@ -1,5 +1,6 @@
 local lu = require("luaunit")
 local manifest = require("mutate4lua.internal.manifest")
+local attribution = require("mutate4lua.internal.attribution")
 local engine = require("mutate4lua.engine")
 local util = require("mutate4lua.util")
 
@@ -524,6 +525,112 @@ function TestEngine:testRoutesMutantsThroughRunResidentWhenNoTestCommand()
   lu.assertNotNil(captured.runner_path)
   assertMatches("mutate4lua/runner%.lua", captured.runner_path)
   lu.assertEquals(captured.params(1).fail_fast, true)
+end
+
+-- test subsetting (map #1, #13): the per-mutant prune set rides the resident
+-- request's `files` field; an unattributable line falls back to the full suite.
+
+-- Seeds a fresh attribution matrix cache for the target so engine.mutate finds
+-- it instead of building one (the build needs a real luacov pass).
+function TestEngine:seed_matrix(rows, extra)
+  util.mkdir_p(util.join_path(self.dir, "tests"))
+  write_file(util.join_path(self.dir, "tests", "test_seed.lua"), "return {}\n")
+  local target_source = read_file(self.target_abs)
+  local matrix = {
+    version = attribution.CURRENT_MATRIX_VERSION,
+    target = self.target_rel,
+    suite_hash = assert(attribution.suite_hash(self.dir)),
+    target_hash = attribution.target_hash(manifest.strip(target_source)),
+    load_lines_known = true,
+    load_lines = {},
+    failing_files = {},
+    files = rows,
+  }
+  for key, value in pairs(extra or {}) do matrix[key] = value end
+  assert(attribution.save(self.dir, self.target_rel, matrix))
+  return matrix
+end
+
+function TestEngine:resident_capture_env()
+  local env = self:null_env()
+  env.run_shell = make_shell({{ok = true}}).fn
+  env.captured = nil
+  env.run_resident = function(spec)
+    env.captured = spec
+    local results = {}
+    for i = 1, spec.job_count do
+      results[i] = killed()
+    end
+    return results
+  end
+  return env
+end
+
+function TestEngine:testPruneSetOfCoveringTestsRidesTheResidentRequest()
+  write_file(self.target_abs, "return 1 == 2\n")
+  self:seed_matrix({["tests/test_seed.lua"] = {1}})
+  local env = self:resident_capture_env()
+  engine.mutate({target = self.target_rel, mutate_all = true, max_workers = 1}, env)
+  lu.assertNotNil(env.captured, "resident pool was not used")
+  lu.assertEquals(env.captured.params(1).files, {"tests/test_seed.lua"})
+end
+
+function TestEngine:testUnattributableLineFallsBackToTheFullSuite()
+  -- nil files means "no prune set": the runner discovers the whole suite.
+  write_file(self.target_abs, "return 1 == 2\n")
+  self:seed_matrix({["tests/test_seed.lua"] = {99}})
+  local env = self:resident_capture_env()
+  engine.mutate({target = self.target_rel, mutate_all = true, max_workers = 1}, env)
+  lu.assertNil(env.captured.params(1).files)
+end
+
+function TestEngine:testLoadTimeLineFallsBackEvenThoughAFileCoveredIt()
+  write_file(self.target_abs, "return 1 == 2\n")
+  self:seed_matrix({["tests/test_seed.lua"] = {1}}, {load_lines = {1}})
+  local env = self:resident_capture_env()
+  engine.mutate({target = self.target_rel, mutate_all = true, max_workers = 1}, env)
+  lu.assertNil(env.captured.params(1).files)
+end
+
+function TestEngine:testStaleMatrixIsIgnoredSoEveryMutantRunsTheFullSuite()
+  -- A stale cache must never prune: the freshness key is the guard, and an
+  -- unusable matrix degrades to pre-subsetting behaviour.
+  write_file(self.target_abs, "return 1 == 2\n")
+  self:seed_matrix({["tests/test_seed.lua"] = {1}}, {suite_hash = "stale"})
+  local env = self:resident_capture_env()
+  -- The rebuild attempt runs through run_shell (stubbed ok, writes no matrix),
+  -- so the engine ends up without an index.
+  engine.mutate({target = self.target_rel, mutate_all = true, max_workers = 1}, env)
+  lu.assertNil(env.captured.params(1).files)
+end
+
+function TestEngine:testReportsFallbackRateForMatrixQuality()
+  write_file(self.target_abs, multi_site_body)
+  self:seed_matrix({["tests/test_seed.lua"] = {1}})
+  local out = {}
+  local env = self:resident_capture_env()
+  env.stdout = capture_buffer(out)
+  engine.mutate({target = self.target_rel, mutate_all = true, max_workers = 1}, env)
+  assertMatches("test subsetting: %d+/%d+ sites pruned, %d+ full%-suite fallback", table.concat(out))
+end
+
+function TestEngine:testTestCommandPathNeverPrunes()
+  -- --test-command owns its own test selection and has no runner to build a
+  -- matrix with, so subsetting stays off there.
+  write_file(self.target_abs, "return 1 == 2\n")
+  self:seed_matrix({["tests/test_seed.lua"] = {1}})
+  local out = {}
+  local shell = make_shell({{ok = true}, {ok = false}})
+  local env = self:null_env()
+  env.stdout = capture_buffer(out)
+  env.run_shell = shell.fn
+  engine.mutate({
+    target = self.target_rel, test_command = "true",
+    mutate_all = true, max_workers = 1,
+  }, env)
+  lu.assertNotNil(shell.commands[2])
+  lu.assertEquals(shell.commands[2], "true")
+  lu.assertNotStrContains(table.concat(out), "test subsetting")
 end
 
 function TestEngine:testResidentPoolGetsOneWorkspacePerWorker()

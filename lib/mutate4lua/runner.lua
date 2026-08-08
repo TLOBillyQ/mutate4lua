@@ -273,6 +273,16 @@ local function execute_pass(args, cache)
         cache.files = files
       end
     end
+  else
+    -- An explicit file list (test subsetting's prune set, map #1 #13) is
+    -- root-relative; resolve it against root the way discovery does, so the
+    -- chunk cache keys match across pruned and full passes and the paths do
+    -- not depend on the process cwd.
+    local resolved = {}
+    for index, file in ipairs(files) do
+      resolved[index] = is_absolute(file) and file or (root .. "/" .. file)
+    end
+    files = resolved
   end
   if #files == 0 then
     return nil, "No test files found."

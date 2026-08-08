@@ -423,6 +423,10 @@ local function _ensure_attribution_matrix(scan_ctx, workspace, run_shell, stdout
   if parent and parent ~= "" then
     util.mkdir_p(parent)
   end
+  -- Drop the stale file first: a build that exits 0 without writing one would
+  -- otherwise leave the old matrix in place, and re-stamping it with the new
+  -- freshness key would prune against outdated attribution.
+  util.remove(matrix_path)
 
   local started = os.time()
   local result = run_shell(_build_attribution_command(matrix_path, relative), workspace, nil)
@@ -465,6 +469,30 @@ local function _ensure_attribution_matrix(scan_ctx, workspace, run_shell, stdout
       "their coverage rows may be incomplete\n")
   end
   return built
+end
+
+-- Per-site prune set (map #1, #13): the test files that cover the mutated line,
+-- as workspace-relative paths the runner takes as positional arguments.
+--
+-- Line-level pruning rests on one invariant — a killer must execute the mutated
+-- line — so the files that covered `site.line` are the only ones that can kill
+-- this mutant. Returns nil for "run the full suite": no index (no matrix, or
+-- --test-command), an unattributable line (load-time line, or nothing covered
+-- it), or an empty set. Over-running is always safe; under-running would drop a
+-- killer and drift the kill set, so every uncertainty resolves to nil (空集回退).
+--
+-- The matrix rows are keyed by workspace-relative path — the build runs inside
+-- the workspace, the same root the mutant passes run with — so a prune set can
+-- be handed to the runner as-is.
+local function _prune_set(index, site)
+  if index == nil or site == nil then
+    return nil
+  end
+  local files = attribution.files_for_line(index, site.line)
+  if files == nil or #files == 0 then
+    return nil
+  end
+  return files
 end
 
 local function _scan_target(workspace_root, target)
@@ -785,14 +813,31 @@ function engine.mutate(options, env)
   -- every mode that runs the built-in runner — including --mutate-all, which
   -- does not run coverage at all and would otherwise have no matrix. The
   -- --test-command escape hatch has no runner to build it with.
-  --
-  -- The matrix is prepared but not yet consumed: pruning the per-mutant suite
-  -- with it (attribution.index / files_for_line) is the engine-wiring ticket's
-  -- (#13) job.
+  local attribution_index = nil
   if not options.test_command then
-    _ensure_attribution_matrix(scan_ctx, workspace, run_shell, stdout, stderr)
+    local matrix = _ensure_attribution_matrix(scan_ctx, workspace, run_shell, stdout, stderr)
+    if matrix then
+      attribution_index = attribution.index(matrix)
+    end
   end
 
+  -- Fallback rate (环节线 ≤10%): how many mutants ran the full suite because
+  -- their line was not attributable. It is the monitoring signal for matrix
+  -- quality (CONTEXT.md, 空集回退), so it is reported even when it is zero.
+  local fallback_count = 0
+  for _, site in ipairs(sites) do
+    if _prune_set(attribution_index, site) == nil then
+      fallback_count = fallback_count + 1
+    end
+  end
+  if attribution_index ~= nil then
+    stdout:write(string.format("test subsetting: %d/%d sites pruned, %d full-suite fallback (%.1f%%)\n",
+      #sites - fallback_count, #sites, fallback_count, fallback_count / #sites * 100))
+  end
+
+  -- Only reachable via --test-command, where subsetting is off (no matrix, and
+  -- the custom command owns its own test selection): the built-in-runner path
+  -- goes through the resident pool, which carries the prune set in its request.
   local function _mutant_command()
     if options.test_command then
       return options.test_command
@@ -836,8 +881,8 @@ function engine.mutate(options, env)
         prepare = function(i, ws)
           util.write_file(util.join_path(ws, relative), scanner.apply_mutation(stripped, sites[i]))
         end,
-        params = function(_)
-          return { fail_fast = true, mutated = relative }
+        params = function(i)
+          return { fail_fast = true, mutated = relative, files = _prune_set(attribution_index, sites[i]) }
         end,
         on_complete = function(i, run_result)
           completed = completed + 1
