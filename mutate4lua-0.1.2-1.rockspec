@@ -35,5 +35,7 @@ build = {
       ["mutate4lua.internal.scanner"] = "lib/mutate4lua/internal/scanner.lua",
       ["mutate4lua.internal.ast"] = "lib/mutate4lua/internal/ast.lua",
       ["mutate4lua.internal.parallel"] = "lib/mutate4lua/internal/parallel.lua",
+      ["mutate4lua.internal.overlay"] = "lib/mutate4lua/internal/overlay.lua",
+      ["mutate4lua.internal.resident"] = "lib/mutate4lua/internal/resident.lua",
    },
 }

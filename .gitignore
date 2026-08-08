@@ -16,3 +16,9 @@ Icon
 .Trashes
 .VolumeIcon.icns
 .com.apple.timemachine.donotpresent
+
+### 构建/测试产物
+luacov.stats.out
+
+### 会话工作区（地图资产、诊断草稿，见 tracker 决议）
+.scratch/

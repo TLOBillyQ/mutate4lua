@@ -2,6 +2,8 @@ local scanner = require("mutate4lua.internal.scanner")
 local manifest = require("mutate4lua.internal.manifest")
 local project = require("mutate4lua.internal.project")
 local parallel = require("mutate4lua.internal.parallel")
+local resident = require("mutate4lua.internal.resident")
+local overlay = require("mutate4lua.internal.overlay")
 local util = require("mutate4lua.util")
 
 local engine = {}
@@ -93,10 +95,18 @@ local function _default_run_shell(shell_command, cwd, timeout_seconds)
   }
 end
 
-local function _create_workspace(source_dir)
+local function _create_workspace(source_dir, target_relative, use_overlay, shared_git_dir)
   local workspace = util.tmp_path("_ws")
   util.remove(workspace)
   util.mkdir_p(workspace)
+  if use_overlay then
+    local ok, err = overlay.populate(source_dir, target_relative, workspace, shared_git_dir)
+    if not ok then
+      util.remove(workspace)
+      return nil, "failed to populate workspace overlay: " .. tostring(err)
+    end
+    return workspace
+  end
   local ok, kind, code = os.execute("cp -r " .. util.shell_quote(source_dir .. "/.") .. " " .. util.shell_quote(workspace .. "/"))
   local exit_code = _parse_exit_code(ok, kind, code)
   if exit_code ~= 0 then
@@ -106,10 +116,33 @@ local function _create_workspace(source_dir)
   return workspace
 end
 
-local function _create_workspaces(source_dir, count)
+local function _create_workspaces(source_dir, count, target_relative, use_overlay, shared_git_dir)
+  if count <= 0 then return {} end
+
+  if use_overlay then
+    local workspaces = {}
+    for _ = 1, count do
+      workspaces[#workspaces + 1] = util.tmp_path("_ws")
+    end
+    local ok, err, returned_shared_git = overlay.populate_many(source_dir, target_relative, workspaces)
+    if not ok then
+      for _, workspace in ipairs(workspaces) do
+        util.remove(workspace)
+      end
+      return nil, "failed to populate workspace overlays: " .. tostring(err)
+    end
+    -- The caller already owns a shared .git copy; remove the duplicate created
+    -- here so we do not leak it. (populate_many only creates a new copy when
+    -- shared_git_dir is not passed; the engine always passes one.)
+    if returned_shared_git and returned_shared_git ~= shared_git_dir then
+      util.remove(returned_shared_git)
+    end
+    return workspaces
+  end
+
   local workspaces = {}
   for _ = 1, count do
-    local workspace, err = _create_workspace(source_dir)
+    local workspace, err = _create_workspace(source_dir, target_relative, use_overlay)
     if not workspace then
       for _, created in ipairs(workspaces) do
         util.remove(created)
@@ -493,6 +526,7 @@ function engine.mutate(options, env)
   local run_shell = env.run_shell or _default_run_shell
   local create_workspaces = env.create_workspaces or _create_workspaces
   local run_parallel = env.run_parallel or parallel.run
+  local run_resident = env.run_resident or resident.run
   local timeout_factor = options.timeout_factor or 10
 
   -- "--lines ''" parses to an empty (but truthy) table; treat it as no filter,
@@ -583,8 +617,15 @@ function engine.mutate(options, env)
   stdout:write("mutate4lua: ", relative, "\n")
   stdout:write("baseline: running...\n")
 
-  local workspace, workspace_err = _create_workspace(workspace_root)
+  local use_overlay = not options.test_command
+  local shared_git_dir
+  if use_overlay then
+    shared_git_dir = overlay.prepare_shared_git(workspace_root)
+  end
+
+  local workspace, workspace_err = _create_workspace(workspace_root, relative, use_overlay, shared_git_dir)
   if not workspace then
+    if shared_git_dir then util.remove(shared_git_dir) end
     stderr:write("error: ", workspace_err, "\n")
     return 1
   end
@@ -594,6 +635,7 @@ function engine.mutate(options, env)
     stderr:write("baseline test failed (exit ", tostring(baseline.code), ")\n")
     if baseline.output ~= "" then stderr:write(baseline.output, "\n") end
     _cleanup(workspace)
+    if shared_git_dir then util.remove(shared_git_dir) end
     return 2
   end
 
@@ -658,12 +700,75 @@ function engine.mutate(options, env)
   local worker_count = _resolve_worker_count(options, #sites)
   local results = {}
 
-  if worker_count > 1 then
+  if not options.test_command then
+    -- Resident workers (ADR-0007): one long-lived runner per slot replaces
+    -- the per-mutant cold-start process. Serial mode is the same pool with a
+    -- single worker. The custom --test-command escape hatch keeps the
+    -- fresh-process paths below.
+    if worker_count > 1 then
+      stdout:write("workers: ", tostring(worker_count), " (parallel)\n")
+    end
+    local workspaces = { workspace }
+    if worker_count > 1 then
+      local extra_workspaces, workspaces_err = create_workspaces(workspace_root, worker_count - 1, relative, use_overlay, shared_git_dir)
+      if not extra_workspaces then
+        stderr:write("error: ", workspaces_err or "failed to create workspaces", "\n")
+        _cleanup(workspace)
+        if shared_git_dir then util.remove(shared_git_dir) end
+        return 1
+      end
+      for _, ws in ipairs(extra_workspaces) do
+        workspaces[#workspaces + 1] = ws
+      end
+    end
+
+    local completed = 0
+    local ok_run, run_results = pcall(function()
+      local collected = run_resident({
+        worker_count = worker_count,
+        job_count = #sites,
+        workspaces = workspaces,
+        timeout = timeout,
+        runner_path = _runner_script_path(),
+        prepare = function(i, ws)
+          util.write_file(util.join_path(ws, relative), scanner.apply_mutation(stripped, sites[i]))
+        end,
+        params = function(_)
+          return { fail_fast = true, mutated = relative }
+        end,
+        on_complete = function(i, run_result)
+          completed = completed + 1
+          local site = sites[i]
+          stdout:write(string.format("[%d/%d] L%d: %s ... %s (%ds)\n",
+            completed, #sites, site.line, site.description,
+            _classify_status(run_result), run_result.elapsed))
+        end,
+      })
+
+      for i, site in ipairs(sites) do
+        local run_result = collected[i]
+        if run_result == nil then
+          error("mutate4lua: missing result for mutation site " .. tostring(i))
+        end
+        results[i] = _result_entry(site, run_result)
+      end
+    end)
+
+    for i = 2, #workspaces do
+      util.remove(workspaces[i])
+    end
+    if not ok_run then
+      _cleanup(workspace)
+      if shared_git_dir then util.remove(shared_git_dir) end
+      error(run_results, 0)
+    end
+  elseif worker_count > 1 then
     stdout:write("workers: ", tostring(worker_count), " (parallel)\n")
-    local extra_workspaces, workspaces_err = create_workspaces(workspace_root, worker_count - 1)
+    local extra_workspaces, workspaces_err = create_workspaces(workspace_root, worker_count - 1, relative, use_overlay, shared_git_dir)
     if not extra_workspaces then
       stderr:write("error: ", workspaces_err or "failed to create workspaces", "\n")
       _cleanup(workspace)
+      if shared_git_dir then util.remove(shared_git_dir) end
       return 1
     end
     local workspaces = { workspace }
@@ -708,6 +813,7 @@ function engine.mutate(options, env)
     end
     if not ok_run then
       _cleanup(workspace)
+      if shared_git_dir then util.remove(shared_git_dir) end
       error(run_results, 0)
     end
   else
@@ -724,6 +830,7 @@ function engine.mutate(options, env)
   end
 
   _cleanup(workspace)
+  if shared_git_dir then util.remove(shared_git_dir) end
 
   local killed, survived, timed_out = 0, 0, 0
   for _, r in ipairs(results) do

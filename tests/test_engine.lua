@@ -465,14 +465,18 @@ function TestEngine:testDefaultBaselineInvokesBuiltinRunnerWithCoverageReport()
   local shell = make_shell({{ok = true}, {ok = false}, {ok = false}})
   local env = self:null_env()
   env.run_shell = shell.fn
+  env.run_resident = function(spec)
+    local results = {}
+    for i = 1, spec.job_count do
+      results[i] = killed()
+    end
+    return results
+  end
   engine.mutate({target = self.target_rel, max_workers = 1}, env)
   local baseline = shell.commands[1]
   lu.assertNotNil(baseline)
   assertMatches("mutate4lua/runner%.lua", baseline)
   assertMatches("%-%-coverage%-report", baseline)
-  local mutant = shell.commands[2]
-  assertMatches("%-%-no%-coverage", mutant)
-  assertMatches("%-%-fail%-fast", mutant)
 end
 
 function TestEngine:testMutateAllBaselineInvokesBuiltinRunnerWithoutCoverage()
@@ -480,10 +484,72 @@ function TestEngine:testMutateAllBaselineInvokesBuiltinRunnerWithoutCoverage()
   local shell = make_shell({{ok = true}, {ok = false}, {ok = false}})
   local env = self:null_env()
   env.run_shell = shell.fn
+  env.run_resident = function(spec)
+    local results = {}
+    for i = 1, spec.job_count do
+      results[i] = killed()
+    end
+    return results
+  end
   engine.mutate({target = self.target_rel, mutate_all = true, max_workers = 1}, env)
   local baseline = shell.commands[1]
   assertMatches("mutate4lua/runner%.lua", baseline)
   assertMatches("%-%-no%-coverage", baseline)
+end
+
+-- resident routing (ADR-0007): without --test-command the mutant loop runs
+-- through the resident worker pool; --test-command keeps the fresh-process
+-- paths.
+
+function TestEngine:testRoutesMutantsThroughRunResidentWhenNoTestCommand()
+  write_file(self.target_abs, multi_site_body)
+  local captured
+  local env = self:null_env()
+  env.run_shell = make_shell({{ok = true}}).fn
+  env.run_resident = function(spec)
+    captured = spec
+    local results = {}
+    for i = 1, spec.job_count do
+      results[i] = killed()
+    end
+    return results
+  end
+  local code = engine.mutate({
+    target = self.target_rel, mutate_all = true, max_workers = 1,
+  }, env)
+  lu.assertEquals(code, 0)
+  lu.assertNotNil(captured, "resident pool was not used")
+  lu.assertTrue(captured.job_count >= 2, "expected multiple mutation sites")
+  lu.assertEquals(captured.worker_count, 1)
+  lu.assertNotNil(captured.runner_path)
+  assertMatches("mutate4lua/runner%.lua", captured.runner_path)
+  lu.assertEquals(captured.params(1).fail_fast, true)
+end
+
+function TestEngine:testResidentPoolGetsOneWorkspacePerWorker()
+  write_file(self.target_abs, multi_site_body)
+  local captured
+  local env = self:null_env()
+  env.run_shell = make_shell({{ok = true}}).fn
+  env.create_workspaces = function(_, count)
+    local list = {}
+    for i = 1, count do list[i] = util.join_path(self.dir, "ws_" .. i) end
+    return list
+  end
+  env.run_resident = function(spec)
+    captured = spec
+    local results = {}
+    for i = 1, spec.job_count do
+      results[i] = killed()
+    end
+    return results
+  end
+  engine.mutate({
+    target = self.target_rel, mutate_all = true, max_workers = 4,
+  }, env)
+  lu.assertNotNil(captured)
+  lu.assertTrue(captured.worker_count >= 2, "expected more than one worker")
+  lu.assertEquals(#captured.workspaces, captured.worker_count)
 end
 
 return TestEngine

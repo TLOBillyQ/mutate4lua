@@ -35,7 +35,7 @@ end
 
 -- Forces exactly one idle scan per job without real concurrency: launch records
 -- each job's status sentinel path (parsed from the launcher script) but writes
--- nothing, so the first scan finds no sentinel. The paired completing_sleep then
+-- nothing, so the first scan finds no sentinel. The paired completing_wait then
 -- writes the sentinels, so the next scan completes the jobs.
 local function deferred_launch(state)
   return function(script_path)
@@ -45,12 +45,12 @@ local function deferred_launch(state)
   end
 end
 
-local function completing_sleep(state)
-  return function(seconds)
-    state.intervals[#state.intervals + 1] = seconds
+local function completing_wait(state)
+  return function(paths, max_wait)
     local pending = state.pending
+    state.wait_calls[#state.wait_calls + 1] = { paths = paths, max_wait = max_wait, pending = pending }
     state.pending = {}
-    for _, status_path in ipairs(pending) do
+    for _, status_path in ipairs(paths) do
       local f = assert(io.open(status_path, "w"))
       f:write("0\n")
       f:close()
@@ -76,7 +76,7 @@ function TestParallel:testReturnsEmptyResultSetForZeroJobs()
     prepare = function() end,
     command = function() return "true" end,
     launch = sync_launch(),
-    sleep = function() end,
+    wait = function() end,
   })
   lu.assertEquals(#results, 0)
 end
@@ -93,7 +93,7 @@ function TestParallel:testRunsEveryJobAndMapsExitCodesToOkAndTimedOut()
     command = function(i) return "(exit " .. tostring(exit_codes[i]) .. ")" end,
     timeout = nil,
     launch = sync_launch(),
-    sleep = function() end,
+    wait = function() end,
   })
   lu.assertEquals(#results, #exit_codes)
   for i, code in ipairs(exit_codes) do
@@ -112,7 +112,7 @@ function TestParallel:testCapturesJobStdoutStderrIntoResultOutput()
     prepare = function() end,
     command = function() return "echo hello-from-job" end,
     launch = sync_launch(),
-    sleep = function() end,
+    wait = function() end,
   })
   lu.assertNotNil(results[1].output:find("hello-from-job", 1, true))
 end
@@ -130,7 +130,7 @@ function TestParallel:testAssignsJobsToWorkspacesFromProvidedPool()
     end,
     command = function() return "true" end,
     launch = sync_launch(),
-    sleep = function() end,
+    wait = function() end,
   })
   for i = 1, 4 do
     lu.assertTrue(pool[seen[i]] == true, "job " .. i .. " ran outside the workspace pool")
@@ -149,15 +149,15 @@ function TestParallel:testFiresOnCompleteExactlyOncePerJob()
       completed[i] = (completed[i] or 0) + 1
     end,
     launch = sync_launch(),
-    sleep = function() end,
+    wait = function() end,
   })
   for i = 1, 5 do
     lu.assertEquals(completed[i], 1)
   end
 end
 
-function TestParallel:testUsesBusyWaitSoIdleWaitDoesNotForkShell()
-  local state = { pending = {}, intervals = {} }
+function TestParallel:testBlocksOnActiveSentinelsWhileJobsRun()
+  local state = { pending = {}, wait_calls = {} }
   parallel.run({
     worker_count = 1,
     job_count = 1,
@@ -165,9 +165,44 @@ function TestParallel:testUsesBusyWaitSoIdleWaitDoesNotForkShell()
     prepare = function() end,
     command = function() return "true" end,
     launch = deferred_launch(state),
-    sleep = completing_sleep(state),
+    wait = completing_wait(state),
   })
-  lu.assertEquals(state.intervals, { 0 })
+  lu.assertEquals(#state.wait_calls, 1)
+  lu.assertEquals(#state.wait_calls[1].paths, 1)
+  lu.assertEquals(state.wait_calls[1].paths[1], state.wait_calls[1].pending[1])
+  lu.assertNil(state.wait_calls[1].max_wait)
+end
+
+function TestParallel:testPassesMaxWaitWhenWatchdogIsArmed()
+  local state = { pending = {}, wait_calls = {} }
+  parallel.run({
+    worker_count = 1,
+    job_count = 1,
+    workspaces = self.workspaces,
+    prepare = function() end,
+    command = function() return "true" end,
+    launch = deferred_launch(state),
+    wait = completing_wait(state),
+    timeout = 10,
+    timeout_command = false,
+  })
+  lu.assertEquals(#state.wait_calls, 1)
+  lu.assertNotNil(state.wait_calls[1].max_wait)
+end
+
+function TestParallel:testDefaultBlockingWaitReturnsWhenSentinelAppears()
+  local start = os.clock()
+  local results = parallel.run({
+    worker_count = 1,
+    job_count = 1,
+    workspaces = self.workspaces,
+    prepare = function() end,
+    command = function() return "sleep 0.05" end,
+  })
+  local elapsed_cpu = os.clock() - start
+  lu.assertEquals(results[1].code, 0)
+  lu.assertTrue(elapsed_cpu < 0.5,
+    "expected engine CPU << wall time, got " .. tostring(elapsed_cpu))
 end
 
 function TestParallel:testEmbedsTimeoutCommandAndAtomicSentinelCommitInLauncher()
@@ -181,7 +216,7 @@ function TestParallel:testEmbedsTimeoutCommandAndAtomicSentinelCommitInLauncher(
     timeout = 12,
     timeout_command = "timeout",
     launch = sync_launch(scripts),
-    sleep = function() end,
+    wait = function() end,
   })
   local script = scripts[1]
   lu.assertNotNil(script:find("timeout 12 run-the-tests", 1, true), "missing timeout prefix")

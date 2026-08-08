@@ -11,11 +11,24 @@ local util = require("mutate4lua.util")
 
 local parallel = {}
 
--- Busy-wait: keep re-scanning the sentinels with no sleep at all. With
--- lazy-loaded suites each mutant runs in well under a second, so a coarse sleep
--- between polls leaves workers idle far longer than the work itself. Busy-wait
--- forks no shell and gives the tightest refill.
-local DEFAULT_POLL_INTERVAL = 0
+-- Blocking sentinel waiter: when a scan finds nothing, the pool blocks in a
+-- tiny POSIX `sh` loop that re-checks the active sentinels every
+-- WAIT_GRANULARITY seconds and exits as soon as any appears. The engine
+-- process sleeps inside os.execute while the waiter's `sleep` children do
+-- the waiting, so an idle pool burns no CPU. Fractional sleep is a macOS/GNU
+-- extension; hosts with a strict POSIX sleep(1) fall back to a 1s
+-- granularity (still correct, but detection latency degrades to the second).
+local WAIT_GRANULARITY
+do
+  -- Lua 5.x returns true on success; LuaJIT returns 0.
+  local ok = os.execute("sleep 0.01 >/dev/null 2>&1")
+  local success = ok == true or ok == 0
+  WAIT_GRANULARITY = success and 0.01 or 1
+end
+-- Maximum time the blocking waiter stays inside os.execute before returning
+-- control to the engine. This is only used when the pool-side watchdog is
+-- armed (host lacks `timeout`) so the watchdog can reap timed-out jobs.
+local WATCHDOG_WAKEUP_SECONDS = 1
 -- 124 means "ended by the timeout path" (the `timeout` command or the
 -- watchdog below). The launcher's `cd` guard also reports 124 when the
 -- workspace is missing — a known misclassification, kept because telling it
@@ -70,13 +83,26 @@ local function _build_launcher_script(workspace, command, timeout_seconds, timeo
   }, "\n")
 end
 
-local function _sleep(seconds)
-  -- The poll interval is hard-coded to 0 (busy-wait). The parameter is kept
-  -- only so the internal shape matches the engine override hook used in tests.
-  if not (seconds and seconds > 0) then
+local function _blocking_wait(paths, max_wait)
+  -- Wait until at least one of `paths` exists, or (when `max_wait` is set)
+  -- until approximately `max_wait` seconds have elapsed. The loop checks the
+  -- sentinels once before its first sleep, so a sentinel that appears between
+  -- the engine scan and the waiter start is still detected immediately.
+  if paths == nil or #paths == 0 then
     return
   end
-  os.execute("sleep " .. tostring(seconds) .. " >/dev/null 2>&1")
+  local parts = { "i=0; while :; do" }
+  for _, path in ipairs(paths) do
+    parts[#parts + 1] = "[ -e " .. util.shell_quote(path) .. " ] && exit 0;"
+  end
+  parts[#parts + 1] = "sleep " .. tostring(WAIT_GRANULARITY) .. " 2>/dev/null;"
+  if max_wait then
+    parts[#parts + 1] = "i=$((i+1)); [ \"$i\" -ge "
+      .. tostring(math.max(1, math.ceil(max_wait / WAIT_GRANULARITY)))
+      .. " ] && exit 1;"
+  end
+  parts[#parts + 1] = "done"
+  os.execute(table.concat(parts, " "))
 end
 
 -- Parses a sentinel body already read by the poll loop. The launcher commits
@@ -117,7 +143,9 @@ end
 --   timeout_command "timeout" / "gtimeout" / false (optional)
 --   on_complete(i, result)  optional callback fired in completion order
 --   launch(script)  optional override for launching a detached job (tests)
---   sleep(seconds)  optional override for the poll sleep (tests)
+--   wait(paths, max_wait)  optional override for the blocking sentinel wait
+--                            (tests). Receives the active status paths and an
+--                            optional "return after ~max_wait seconds" hint.
 --
 -- Returns a dense array results[1..job_count]; each entry is
 --   { ok = bool, code = int, output = string, elapsed = int, timed_out = bool }
@@ -132,7 +160,7 @@ function parallel.run(spec)
   local launch = spec.launch or function(script_path)
     os.execute("sh " .. util.shell_quote(script_path) .. " >/dev/null 2>&1 &")
   end
-  local sleep = spec.sleep or _sleep
+  local wait = spec.wait or _blocking_wait
 
   local slots = {}
   for s = 1, worker_count do
@@ -219,8 +247,8 @@ function parallel.run(spec)
     for s = 1, worker_count do
       local slot = slots[s]
       if slot.job ~= nil then
-        -- Pure-Lua poll: a missing sentinel means "still running", so the
-        -- busy-wait scans without forking a shell per poll (see header).
+        -- Sentinel poll: a missing sentinel means "still running". The
+        -- blocking wait below replaces the previous 0-interval busy-wait.
         local content = util.read_file(slot.status_path)
         if content == nil then
           _reap_if_timed_out(slot, spec.timeout)
@@ -248,11 +276,25 @@ function parallel.run(spec)
     end
     dispatch()
     if not progressed then
-      sleep(DEFAULT_POLL_INTERVAL)
+      local active_paths = {}
+      for s = 1, worker_count do
+        if slots[s].job ~= nil then
+          active_paths[#active_paths + 1] = slots[s].status_path
+        end
+      end
+      local max_wait = nil
+      if spec.timeout and spec.timeout > 0 and not spec.timeout_command then
+        max_wait = WATCHDOG_WAKEUP_SECONDS
+      end
+      wait(active_paths, max_wait)
     end
   end
 
   return results
 end
+
+-- Shared with internal/resident.lua, which waits on worker result sentinels
+-- with the same blocking-wait discipline. Internal; not part of the spec.
+parallel._blocking_wait = _blocking_wait
 
 return parallel
