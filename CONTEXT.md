@@ -7,7 +7,7 @@ mutate4lua 领域术语表。
 - **mutant（变异体）**：对目标源文件应用一条变异规则后的版本；测试通过则"存活"（survivor），失败/超时则"被击杀"（killed）。
 - **scope**：差异化追踪的最小单位，以声明为基准（函数、`if`、`do`、`repeat` 块），以 semantic hash 判变。
 - **manifest**：嵌入目标源文件尾部的 `--[[ mutate4lua-manifest ... ]]` footer，记录各 scope 的 hash，用于差分选择。
-- **baseline**：变异前先跑的一次完整测试，确认套件本身通过并生成覆盖率。
+- **baseline**：变异前先跑的一次完整测试（**无覆盖率插桩**），确认套件本身通过并提供 `baseline.elapsed` 作为 timeout 因子；失败 exit 2。覆盖率行集合不再由 baseline 生成，改由归因矩阵推导（地图 #1 / #18 路径 2 / #21）。
 
 ## 性能专题术语（Gitea 地图 #1「mutate4lua 性能优化」）
 
@@ -24,9 +24,9 @@ mutate4lua 领域术语表。
 - **行级剪枝**：子集化默认粒度——只跑覆盖变异行（site.line）的测试文件；依据不变量「击杀者必执行变异行」。降级预案为 **scope 级剪枝**（跑覆盖所属 scope 任一行的测试文件），双跑发现击杀集合漂移时升级重验。
 - **暖缓存计线**：S1/S2 最终线与环节级验收线在归因矩阵缓存就绪后测量；冷缓存自动构建属一次性预备，成本单列环节线（类比 `.toolcache` 预热惯例）。
 - **两档验收**：性能验收的记账方式——环节级验收线（每个杠杆单独兑现的固定收益，因低风险档对总墙钟影响小而设）与地图级最终线（整个优化努力的墙钟上限）并行，互不替代。
-- **插桩收窄**：luacov 的 include 收窄到目标源文件（排除 vendor、`.toolcache` 等非目标路径）的冷路径杠杆；依据不变量「引擎只消费目标文件的行覆盖」，收窄不改变覆盖率过滤结果。
-- **套件 hash**：全部测试文件（`test_*.lua`）内容拼接的 hash，覆盖率缓存与归因矩阵的失效键成分之一。_避免_：与 project hash 混用——后者输入含全部 `*.lua`（含 src），dev loop 改无关 src 会误伤缓存命中。
+- **插桩收窄**：（已作废，#18 路径 2 / #21）原指 luacov include 收窄到目标源文件的冷路径杠杆；独立覆盖率 baseline 删除后对象不复存在。
+- **套件 hash**：全部测试文件（`test_*.lua`）内容拼接的 hash，归因矩阵的失效键成分之一。_避免_：与 project hash 混用——后者输入含全部 `*.lua`（含 src），dev loop 改无关 src 会误伤缓存命中。
 - **等价变异抑制**：scanner 在产点时按规则内 **suppress-when** 静态谓词跳过**构造性等价**位点，使其不进入运行集也不进入 score 分母（clj-mutate 同构；见 ADR-0001）。构造性等价 = 变异后行为对所有输入不变（如分支不可达、Lua 5.4 `string.sub` start<1 归一、tostring 恒等往返）。谓词可见 node/parent/source/replacement；规则集 = 通用 Lua 构造 + 盖全基准 9 等价的窄谓词（禁止行号/原文指纹）。score 口径随之变化（基准存活 15→6）；CLI 不加 flag，diagnostics 多一行 `suppressed equivalent sites: N`。
   _避免_：引擎生成后标记 equivalent（已否决）、位点指纹式特化。
 - **误抑制**：把可击杀位点当成构造性等价而跳过——等价变异抑制的唯一正确性面。门禁 = 单元 fixture + monopoly `number.lua` 金标准（抑制集必须盖住 F3 的 9 个等价位点，且不得盖住 26 个加载期可杀位点）。
-- **覆盖率缓存**：差分场景 luacov baseline 报告的落盘缓存，默认开启；新鲜度校验键 = 套件 hash + 目标源文件 hash，stale 或缺失时自动重跑并回写。`--reuse-coverage` 是其显式入口，语义升级为走同一套校验（取代「缺失时警告后继续」的旧行为）。
+- **覆盖率缓存**：（已作废，#18 路径 2 / #21）原指差分场景 luacov baseline 报告的落盘缓存；独立覆盖率 baseline 删除后对象不复存在。覆盖过滤改读归因矩阵（`files` 行并集 ∪ `load_lines`）；`--reuse-coverage` CLI 表面保留，语义重指矩阵缓存新鲜度路径（不再读 `luacov.report.out`）。

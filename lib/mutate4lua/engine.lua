@@ -269,11 +269,9 @@ local function _parse_luacov_report(report_path, workspace_root, target_relative
 end
 
 -- Exposed only for fixture-based tests; not part of the public API.
+-- The mutate path no longer consults luacov.report.out (#21); the parser
+-- remains for the unit tests that pin the default-reporter format contract.
 engine._parse_luacov_report = _parse_luacov_report
-
-local function _coverage_report_path(workspace_root)
-  return util.join_path(workspace_root, "luacov.report.out")
-end
 
 local function _filter_by_coverage(sites, covered_lines)
   local filtered = {}
@@ -706,31 +704,30 @@ function engine.mutate(options, env)
     return _emit_empty_result(stdout, options, scan_ctx, "no mutation sites to test", 0)
   end
 
-  local coverage_path = _coverage_report_path(workspace_root)
-  local coverage_available = false
-  local coverage_lines = nil
+  -- Baseline is always a suite-health run without coverage instrumentation.
+  -- Coverage filtering used to come from a second, instrumented baseline
+  -- (luacov.report.out); path 2 of map #1 / #18 deletes that pass and derives
+  -- the covered-line set from the attribution matrix instead (#21). The matrix
+  -- already runs the full suite under luacov once, so a dedicated coverage
+  -- baseline was pure duplication (≈310s on the monopoly benchmark).
+  --
+  -- Suite-health exit 2 stays on this bare baseline: the matrix builder
+  -- tolerates per-file failures (failing_files) so it cannot double as the
+  -- full-suite gate. Matrix failure is soft — no coverage filter, no prune
+  -- (宁多跑不漏杀) — and never itself becomes exit 2.
   local baseline_cmd
-  local baseline_uses_coverage = false
-
   if options.test_command then
     baseline_cmd = options.test_command
     stderr:write("warning: --test-command disables coverage filtering; treating all sites as covered\n")
-    coverage_available = true
-  elseif options.mutate_all then
-    baseline_cmd = _build_runner_command(nil, false)
-    coverage_available = true
-  elseif options.reuse_coverage then
-    coverage_lines = _parse_luacov_report(coverage_path, workspace_root, relative)
-    if coverage_lines then
-      coverage_available = true
-    else
-      stderr:write("warning: --reuse-coverage requested but ", coverage_path, " not found; continuing without coverage filtering\n")
-      coverage_available = true
-    end
-    baseline_cmd = _build_runner_command(nil, false)
   else
-    baseline_cmd = _build_runner_command(coverage_path, false)
-    baseline_uses_coverage = true
+    baseline_cmd = _build_runner_command(nil, false)
+  end
+
+  if options.reuse_coverage then
+    -- CLI surface kept; flag no longer reads luacov.report.out. Coverage
+    -- filtering is the matrix path below (same freshness key as always).
+    stderr:write("note: --reuse-coverage now uses the attribution matrix cache; ",
+      "luacov.report.out is no longer consulted\n")
   end
 
   stdout:write("mutate4lua: ", relative, "\n")
@@ -758,19 +755,33 @@ function engine.mutate(options, env)
     return 2
   end
 
-  if baseline_uses_coverage then
-    coverage_lines = _parse_luacov_report(coverage_path, workspace, relative)
-    coverage_available = true
+  -- Attribution matrix prep (map #1, #12/#21). Built here so it is available in
+  -- every mode that runs the built-in runner — including --mutate-all, which
+  -- does not filter by coverage but still prunes by line. The --test-command
+  -- escape hatch has no runner to build it with.
+  local attribution_index = nil
+  local coverage_lines = nil
+  if not options.test_command then
+    local matrix = _ensure_attribution_matrix(scan_ctx, workspace, run_shell, stdout, stderr)
+    if matrix then
+      attribution_index = attribution.index(matrix)
+      -- Differential path filters uncovered sites with the matrix-derived
+      -- line set. --mutate-all keeps every site (coverage filter off) but
+      -- still uses the matrix for per-site prune sets below.
+      if not options.mutate_all then
+        coverage_lines = attribution.covered_lines(matrix)
+      end
+    end
   end
 
-  if coverage_available and coverage_lines then
+  if coverage_lines then
     sites = _filter_by_coverage(sites, coverage_lines)
   end
 
   local total_sites = #data.sites
   local covered_count
   local uncovered_count
-  if coverage_available and coverage_lines then
+  if coverage_lines then
     covered_count = #_filter_by_coverage(data.sites, coverage_lines)
     uncovered_count = total_sites - covered_count
   else
@@ -786,7 +797,7 @@ function engine.mutate(options, env)
   if uncovered_count > 0 then
     local list = {}
     for _, site in ipairs(data.sites) do
-      if not (coverage_lines or {})[site.line] then
+      if not coverage_lines[site.line] then
         list[#list + 1] = tostring(site.line)
       end
     end
@@ -808,18 +819,6 @@ function engine.mutate(options, env)
 
   local timeout = math.max(5, (baseline.elapsed + 1) * timeout_factor)
   stdout:write("baseline: ", tostring(baseline.elapsed), "s (timeout: ", tostring(math.ceil(timeout)), "s)\n")
-
-  -- Attribution matrix prep (map #1, #12). Built here so it is available in
-  -- every mode that runs the built-in runner — including --mutate-all, which
-  -- does not run coverage at all and would otherwise have no matrix. The
-  -- --test-command escape hatch has no runner to build it with.
-  local attribution_index = nil
-  if not options.test_command then
-    local matrix = _ensure_attribution_matrix(scan_ctx, workspace, run_shell, stdout, stderr)
-    if matrix then
-      attribution_index = attribution.index(matrix)
-    end
-  end
 
   -- Fallback rate (环节线 ≤10%): how many mutants ran the full suite because
   -- their line was not attributable. It is the monitoring signal for matrix

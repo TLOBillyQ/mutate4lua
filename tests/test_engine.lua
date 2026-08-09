@@ -292,41 +292,70 @@ function TestEngine:testWarnsAndTreatsAllSitesCoveredWhenTestCommandUsed()
   assertMatches("test%-command disables coverage filtering", table.concat(err))
 end
 
-function TestEngine:testReusesExistingLuacovReportWithReuseCoverage()
+-- Coverage filtering now comes from the attribution matrix (#21), not
+-- luacov.report.out. Seed a fresh matrix under .mutate4lua/attribution/ so the
+-- engine path exercises the matrix-derived filter without a real suite.
+local function seed_attribution_matrix(dir, target_rel, stripped, covered_lines)
+  local test_dir = util.join_path(dir, "tests")
+  util.mkdir_p(test_dir)
+  local test_path = util.join_path(test_dir, "test_seed.lua")
+  write_file(test_path, "return {}\n")
+  local suite_hash = assert(attribution.suite_hash(dir, {test_path}))
+  local target_hash = attribution.target_hash(stripped)
+  local matrix = {
+    version = attribution.CURRENT_MATRIX_VERSION,
+    target = target_rel,
+    suite_hash = suite_hash,
+    target_hash = target_hash,
+    load_lines_known = true,
+    load_lines = {},
+    failing_files = {},
+    files = {["tests/test_seed.lua"] = covered_lines},
+  }
+  assert(attribution.save(dir, target_rel, matrix))
+end
+
+function TestEngine:testFiltersUncoveredSitesUsingAttributionMatrix()
   write_file(self.target_abs, "local x = 1\nlocal y = 2\nreturn x == y\n")
-  -- Line 1 has the only mutation site in this file; mark it uncovered.
-  write_file(util.join_path(self.dir, "luacov.report.out"), make_luacov_report(self.target_rel, {false, false, false}))
+  -- Mutation site is on line 3 (the == comparison); mark no lines covered.
+  seed_attribution_matrix(self.dir, self.target_rel, "local x = 1\nlocal y = 2\nreturn x == y\n", {})
   local shell = make_shell({{ok = true}})
   local out = {}
   local env = self:null_env()
   env.run_shell = shell.fn
   env.stdout = capture_buffer(out)
-  local code = engine.mutate({target = self.target_rel, reuse_coverage = true, max_workers = 1}, env)
+  local code = engine.mutate({target = self.target_rel, max_workers = 1}, env)
   lu.assertEquals(code, 0)
   local output = table.concat(out)
   assertMatches("no covered mutation sites", output)
   assertMatches("uncovered mutation sites: ", output)
 end
 
-function TestEngine:testWarnsAndContinuesWithoutFilteringWhenReuseCoverageHasNoReport()
+function TestEngine:testReuseCoverageNotesMatrixPathAndIgnoresLuacovReport()
   write_file(self.target_abs, "return 1 == 2\n")
+  write_file(util.join_path(self.dir, "luacov.report.out"), make_luacov_report(self.target_rel, {false}))
   local err = {}
   local shell = make_shell({{ok = true}, {ok = false}, {ok = false}})
   local env = self:null_env()
   env.run_shell = shell.fn
   env.stderr = capture_buffer(err)
+  env.run_resident = function(spec)
+    local results = {}
+    for i = 1, spec.job_count do results[i] = {ok = false, code = 1, elapsed = 0} end
+    return results
+  end
   engine.mutate({target = self.target_rel, reuse_coverage = true, max_workers = 1}, env)
-  assertMatches("reuse%-coverage requested but", table.concat(err))
+  assertMatches("%-%-reuse%-coverage now uses the attribution matrix", table.concat(err))
 end
 
-function TestEngine:testSucceedsWhenAllDiscoveredSitesAreUncovered()
+function TestEngine:testSucceedsWhenAllDiscoveredSitesAreUncoveredByMatrix()
   write_file(self.target_abs, "local y = 2\nreturn y == 3\n")
-  -- The mutation site is on line 2 (the == comparison).
-  write_file(util.join_path(self.dir, "luacov.report.out"), make_luacov_report(self.target_rel, {nil, false}))
+  -- The mutation site is on line 2 (the == comparison); leave it uncovered.
+  seed_attribution_matrix(self.dir, self.target_rel, "local y = 2\nreturn y == 3\n", {})
   local shell = make_shell({{ok = true}})
   local env = self:null_env()
   env.run_shell = shell.fn
-  local code = engine.mutate({target = self.target_rel, reuse_coverage = true, max_workers = 1}, env)
+  local code = engine.mutate({target = self.target_rel, max_workers = 1}, env)
   lu.assertEquals(code, 0)
 end
 
@@ -461,7 +490,8 @@ end
 -- built-in runner resolution (ADR-0005): without --test-command the engine
 -- invokes the runner shipped next to engine.lua; no driver script is needed.
 
-function TestEngine:testDefaultBaselineInvokesBuiltinRunnerWithCoverageReport()
+function TestEngine:testDefaultBaselineInvokesBuiltinRunnerWithoutCoverage()
+  -- #21: baseline is suite-health only; coverage comes from the matrix.
   write_file(self.target_abs, "return 1 == 2\n")
   local shell = make_shell({{ok = true}, {ok = false}, {ok = false}})
   local env = self:null_env()
@@ -477,7 +507,7 @@ function TestEngine:testDefaultBaselineInvokesBuiltinRunnerWithCoverageReport()
   local baseline = shell.commands[1]
   lu.assertNotNil(baseline)
   assertMatches("mutate4lua/runner%.lua", baseline)
-  assertMatches("%-%-coverage%-report", baseline)
+  assertMatches("%-%-no%-coverage", baseline)
 end
 
 function TestEngine:testMutateAllBaselineInvokesBuiltinRunnerWithoutCoverage()

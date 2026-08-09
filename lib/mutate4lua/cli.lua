@@ -16,7 +16,7 @@ local function _help_text(command_name)
     "  --mutate-all               忽略 manifest 变异所有位点 / ignore manifest and mutate all sites",
     "  --since-last-run           只变异与 manifest 不同的 scope / restrict to changed scopes",
     "  --lines N,N                限制行号 / restrict to lines",
-    "  --reuse-coverage           复用已有 luacov 报告 / reuse existing luacov report",
+    "  --reuse-coverage           使用归因矩阵缓存做覆盖过滤（兼容保留）/ use attribution matrix cache for coverage filtering",
     "  --max-workers N            并行 worker 数（默认 CPU 核数的一半，1=串行）",
     "  --timeout-factor N         超时倍数 / timeout multiplier (default 10)",
     "  --test-command CMD         自定义测试命令 / custom test command",

@@ -256,4 +256,22 @@ function attribution.files_for_line(index, line)
   return bucket
 end
 
+-- Covered lines of the target: union of every per-file row with load_lines.
+-- Replaces the independent luacov baseline report as the coverage-filter input
+-- (map #1, #18 path 2 / #21): the matrix already records every line the suite
+-- executed in the target, so a second coverage pass is pure duplication.
+function attribution.covered_lines(matrix)
+  local covered = {}
+  if matrix == nil then return covered end
+  for _, lines in pairs(matrix.files or {}) do
+    for _, line in ipairs(lines) do
+      covered[line] = true
+    end
+  end
+  for _, line in ipairs(matrix.load_lines or {}) do
+    covered[line] = true
+  end
+  return covered
+end
+
 return attribution
