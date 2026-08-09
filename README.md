@@ -4,6 +4,15 @@
 `lib/mutate4lua/` 目录下；宿主项目将其 vendor 进来，通过
 `require("mutate4lua.cli").run(args, env)` 暴露 CLI。
 
+## 0.2.0 变更要点
+
+- 归因矩阵取代独立覆盖率 baseline：覆盖过滤与测试子集化复用同一份 per-file 行归因，
+  baseline 只负责确认测试套件通过及提供超时基准。
+- scanner 在产点时抑制构造性等价变异；被抑制位点不进入执行集或 mutation score
+  分母，报告会显示抑制数量。
+- `--reuse-coverage` 保留原有 CLI 表面，但语义改为要求复用新鲜的归因矩阵缓存，不再读取
+  `luacov.report.out`。
+
 ## 上游对齐 (Upstream Alignment)
 
 `mutate4lua` 遵循"Lua 忠实实现上游规格"的总纲，以

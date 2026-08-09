@@ -1,9 +1,9 @@
 rockspec_format = "3.0"
 package = "mutate4lua"
-version = "0.1.2-1"
+version = "0.2.0-1"
 source = {
    url = "git+http://lzxsvn:3000/qinyuanj/mutate4lua.git",
-   tag = "v0.1.2",
+   tag = "v0.2.0",
 }
 description = {
    summary = "Mutation testing library for Lua",
@@ -28,14 +28,15 @@ build = {
       ["mutate4lua"] = "lib/mutate4lua/init.lua",
       ["mutate4lua.cli"] = "lib/mutate4lua/cli.lua",
       ["mutate4lua.engine"] = "lib/mutate4lua/engine.lua",
-      ["mutate4lua.util"] = "lib/mutate4lua/util.lua",
       ["mutate4lua.runner"] = "lib/mutate4lua/runner.lua",
-      ["mutate4lua.internal.manifest"] = "lib/mutate4lua/internal/manifest.lua",
-      ["mutate4lua.internal.project"] = "lib/mutate4lua/internal/project.lua",
-      ["mutate4lua.internal.scanner"] = "lib/mutate4lua/internal/scanner.lua",
+      ["mutate4lua.util"] = "lib/mutate4lua/util.lua",
       ["mutate4lua.internal.ast"] = "lib/mutate4lua/internal/ast.lua",
-      ["mutate4lua.internal.parallel"] = "lib/mutate4lua/internal/parallel.lua",
+      ["mutate4lua.internal.attribution"] = "lib/mutate4lua/internal/attribution.lua",
+      ["mutate4lua.internal.manifest"] = "lib/mutate4lua/internal/manifest.lua",
       ["mutate4lua.internal.overlay"] = "lib/mutate4lua/internal/overlay.lua",
+      ["mutate4lua.internal.parallel"] = "lib/mutate4lua/internal/parallel.lua",
+      ["mutate4lua.internal.project"] = "lib/mutate4lua/internal/project.lua",
       ["mutate4lua.internal.resident"] = "lib/mutate4lua/internal/resident.lua",
+      ["mutate4lua.internal.scanner"] = "lib/mutate4lua/internal/scanner.lua",
    },
 }
