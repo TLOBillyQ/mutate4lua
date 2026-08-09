@@ -1,7 +1,7 @@
 # mutate4lua
 
 `mutate4lua` 是一个纯 Lua、与宿主无关的变异测试库，适用于 Lua 项目。实现代码位于
-`lib/mutate4lua/` 目录下；宿主项目将其 vendor 进来，通过
+`src/` 目录下；宿主项目将其 vendor 进来，通过
 `require("mutate4lua.cli").run(args, env)` 暴露 CLI。
 
 ## 0.2.0 变更要点
@@ -40,7 +40,7 @@
   `0` ↔ `1`、右值 → `nil`（java 版右值 → `null` 的 Lua 对应）。
 - scope 身份以声明为基准，非行号为基准（java 规格 §7.3）。
 - worker 操作模块副本；原始文件永不在原地变异；超时的 mutant 视为已击杀。
-- 测试经**内建 luaunit runner**（`lib/mutate4lua/runner.lua`）运行——上游
+- 测试经**内建 luaunit runner**（`src/runner.lua`）运行——上游
   "内置构建工具调用"（maven / `go test`）的 Lua 对应；宿主测试遵循
   `test_*.lua` 约定（ADR-0005）。`--test-command` 为上游同款逃生舱。
 
@@ -82,7 +82,7 @@
 本包仅暴露 Lua 模块。不提供独立的 `bin/` 入口点；宿主通过薄 wrapper 接入：
 
 ```lua
-package.path = "vendor/mutate4lua/lib/?.lua;vendor/mutate4lua/lib/?/init.lua;" .. package.path
+package.path = "vendor/mutate4lua/src/?.lua;vendor/mutate4lua/src/?/init.lua;" .. package.path
 os.exit(require("mutate4lua.cli").run(arg, {
   cwd = ".",
   command_name = "lua tools/mutate.lua",
@@ -123,7 +123,7 @@ lua tools/mutate.lua src/demo/flag.lua --test-command "busted"
 
 ## 内建 runner 与测试约定 (Built-in Runner)
 
-未提供 `--test-command` 时，引擎调起内建 runner（`lib/mutate4lua/runner.lua`）
+未提供 `--test-command` 时，引擎调起内建 runner（`src/runner.lua`）
 驱动测试（ADR-0005）。宿主**无需提供任何脚本**，只需遵循测试约定：
 
 - 测试文件位于项目根的 `spec/`、`test/` 或 `tests/` 目录下，以 `test_*.lua`
@@ -227,7 +227,7 @@ export LUA_PATH="/Users/$USER/.luarocks/share/lua/5.4/?.lua;$LUA_PATH"
 
 ## 接入新项目（示例：eggy）(Integrating)
 
-1. vendor `mutate4lua`（submodule 或直接复制），在薄 wrapper 脚本中将其 `lib/`
+1. vendor `mutate4lua`（submodule 或直接复制），在薄 wrapper 脚本中将其 `src/`
    加入 `package.path`，并按上文所示调用 `cli.run`。
 2. 按测试约定组织测试：`test/test_*.lua`，每个文件 `return` 一个 luaunit 测试表；
    被测模块放在 `lib/`（或 `src/`）下。无需编写任何 runner/driver 脚本。
@@ -278,7 +278,7 @@ lua tests/run.lua tests/test_engine.lua   # 运行指定文件
 
 ## 中文文档
 
-`mutate4lua` 是纯 Lua、与宿主无关的变异测试库，代码位于 `lib/mutate4lua/`。
+`mutate4lua` 是纯 Lua、与宿主无关的变异测试库，代码位于 `src/`。
 宿主项目 vendor 本库后，通过 `require("mutate4lua.cli").run(args, env)` 暴露 CLI。
 
 它支持扫描变异位点、按 manifest 做差异化变异（默认只重测 semantic hash 变化过的
@@ -318,7 +318,7 @@ manifest 机制：每个目标文件末尾的 footer 注释，内容为 `key=val
 （`test_*.lua` 返回 luaunit 测试表）；注意默认 `--timeout-factor` 已从 15 改为 10；
 安装 luaunit 与 luacov（luarocks）。
 
-内建 runner：未传 `--test-command` 时，引擎调起 `lib/mutate4lua/runner.lua`
+内建 runner：未传 `--test-command` 时，引擎调起 `src/runner.lua`
 运行测试（ADR-0005）。宿主无需提供脚本，遵循约定即可：测试位于 `spec|test|tests/`
 下、以 `test_*.lua` 命名、返回 luaunit 测试表；被测模块放在 `lib/`（或 `src/`）。
 引擎对 runner 的调用形态：

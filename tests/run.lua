@@ -3,4 +3,4 @@
 -- test_*.lua + luaunit convention hosts do (ADR-0005, dogfood). With no
 -- arguments the runner discovers tests/test_*.lua itself.
 
-dofile("lib/mutate4lua/runner.lua")
+dofile("src/runner.lua")

@@ -12,7 +12,7 @@
 
 local script_path = arg[0] or "."
 local script_dir = script_path:match("^(.*)/") or "."
-package.path = script_dir .. "/../lib/?.lua;" .. script_dir .. "/../lib/?/init.lua;" .. package.path
+package.path = script_dir .. "/../src/?.lua;" .. script_dir .. "/../src/?/init.lua;" .. package.path
 
 local manifest = require("mutate4lua.internal.manifest")
 local scanner = require("mutate4lua.internal.scanner")

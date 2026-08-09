@@ -508,7 +508,7 @@ function TestEngine:testDefaultBaselineInvokesBuiltinRunnerWithoutCoverage()
   engine.mutate({target = self.target_rel, max_workers = 1}, env)
   local baseline = shell.commands[1]
   lu.assertNotNil(baseline)
-  assertMatches("mutate4lua/runner%.lua", baseline)
+  assertMatches("src/runner%.lua", baseline)
   assertMatches("%-%-no%-coverage", baseline)
 end
 
@@ -526,7 +526,7 @@ function TestEngine:testMutateAllBaselineInvokesBuiltinRunnerWithoutCoverage()
   end
   engine.mutate({target = self.target_rel, mutate_all = true, max_workers = 1}, env)
   local baseline = shell.commands[1]
-  assertMatches("mutate4lua/runner%.lua", baseline)
+  assertMatches("src/runner%.lua", baseline)
   assertMatches("%-%-no%-coverage", baseline)
 end
 
@@ -555,7 +555,7 @@ function TestEngine:testRoutesMutantsThroughRunResidentWhenNoTestCommand()
   lu.assertTrue(captured.job_count >= 2, "expected multiple mutation sites")
   lu.assertEquals(captured.worker_count, 1)
   lu.assertNotNil(captured.runner_path)
-  assertMatches("mutate4lua/runner%.lua", captured.runner_path)
+  assertMatches("src/runner%.lua", captured.runner_path)
   lu.assertEquals(captured.params(1).fail_fast, true)
 end
 

@@ -156,10 +156,35 @@ end
 -- package.path is rebuilt from the base captured at load time on every pass,
 -- so serve mode can switch roots per job without accumulating duplicates.
 local base_package_path = package.path
+local source_package_root = nil
+
+local function source_package_searcher(name)
+  if source_package_root == nil or (name ~= "mutate4lua" and name:sub(1, 11) ~= "mutate4lua.") then
+    return "\n\tno source package module '" .. name .. "'"
+  end
+
+  local relative = name == "mutate4lua" and "init" or name:sub(12):gsub("%.", "/")
+  local path = source_package_root .. "/" .. relative .. ".lua"
+  local chunk, err = loadfile(path)
+  if chunk == nil then
+    return "\n\tno source package module '" .. name .. "' at " .. path .. ": " .. tostring(err)
+  end
+  return chunk, path
+end
+
+table.insert(package.searchers, 2, source_package_searcher)
 
 local function set_package_path(root)
   -- Host code convention: modules under lib/ or src/ of the project root,
-  -- loadable both as lib/?.lua and lib/?/init.lua.
+  -- loadable both as lib/?.lua and lib/?/init.lua. mutate4lua's source tree
+  -- is an exception: its public module prefix maps directly onto src/.
+  local source_init = io.open(root .. "/src/init.lua", "rb")
+  if source_init then
+    source_init:close()
+    source_package_root = root .. "/src"
+  else
+    source_package_root = nil
+  end
   package.path = table.concat({
     root .. "/lib/?.lua",
     root .. "/lib/?/init.lua",

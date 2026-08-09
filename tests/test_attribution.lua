@@ -16,7 +16,7 @@ if repo_root == nil then
   repo_root = util.trim(pipe:read("*l"))
   pipe:close()
 end
-local runner_path = repo_root .. "/lib/mutate4lua/runner.lua"
+local runner_path = repo_root .. "/src/runner.lua"
 
 local function shell_quote(value)
   return "'" .. tostring(value):gsub("'", "'\\''") .. "'"
