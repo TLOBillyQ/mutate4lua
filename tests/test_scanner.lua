@@ -396,4 +396,235 @@ function TestScanner:testSkipsStringToNilInMethodCallSugarForm()
   lu.assertEquals(count_sites(result, "replace x with nil"), 0)
 end
 
+-- ── suppress-when (ADR-0001 / equivalent mutation suppression) ───────────
+-- Each predicate has a positive case (must suppress) and a counterexample
+-- (must not suppress). The monopoly number.lua gold standard is checked
+-- separately below.
+
+function TestScanner:testSuppressesStringSubStartOneToZero()
+  local result = analyze("local function f(s)\n  return string.sub(s, 1, 1)\nend\n")
+  -- start arg suppressed; stop arg kept
+  local ones = 0
+  for _, site in ipairs(result.sites) do
+    if site.description == "replace 1 with 0" then ones = ones + 1 end
+  end
+  lu.assertEquals(ones, 1, "only the stop arg 1→0 should remain")
+  lu.assertEquals(result.suppressed_equivalent, 1)
+end
+
+function TestScanner:testDoesNotSuppressStringSubStopOneToZero()
+  local source = "local function f(s)\n  return string.sub(s, 2, 1)\nend\n"
+  local result = analyze(source)
+  local site = find_site(result, "replace 1 with 0")
+  lu.assertNotNil(site)
+  lu.assertEquals(site.original_text, "1")
+end
+
+function TestScanner:testSuppressesStringByteStartOneToZero()
+  local result = analyze("local function f(s)\n  return string.byte(s, 1)\nend\n")
+  lu.assertEquals(count_sites(result, "replace 1 with 0"), 0)
+  lu.assertTrue(result.suppressed_equivalent >= 1)
+end
+
+function TestScanner:testDoesNotSuppressBareOneToZeroOutsideStringLib()
+  local result = analyze("local function f()\n  local x = 1\n  return x\nend\n")
+  lu.assertEquals(count_sites(result, "replace 1 with 0"), 1)
+end
+
+function TestScanner:testSuppressesTrueToFalseOnTypeNameSetExtensionKeys()
+  local source = table.concat({
+    "local names = {\n",
+    "  number = true,\n",
+    "  integer = true,\n",
+    "  fixed = true,\n",
+    "}\n",
+    "return names\n",
+  })
+  local result = analyze(source)
+  lu.assertEquals(count_sites(result, "replace true with false"), 0)
+  lu.assertEquals(result.suppressed_equivalent, 3)
+end
+
+function TestScanner:testDoesNotSuppressTrueToFalseOnFeatureFlagTable()
+  -- debug is not a type-name extension, so the table is not a type-name set
+  local source = "local flags = { number = true, debug = true }\nreturn flags\n"
+  local result = analyze(source)
+  lu.assertEquals(count_sites(result, "replace true with false"), 2)
+end
+
+function TestScanner:testDoesNotSuppressReturnTrue()
+  local source = "local function f()\n  return true\nend\n"
+  local result = analyze(source)
+  lu.assertEquals(count_sites(result, "replace true with false"), 1)
+end
+
+function TestScanner:testSuppressesTrueToFalseOnTypeNameSetIndexEqTrue()
+  local source = table.concat({
+    "local names = { number = true, integer = true }\n",
+    "local function is_num(t)\n",
+    "  return names[t] == true\n",
+    "end\n",
+    "return is_num\n",
+  })
+  local result = analyze(source)
+  -- table fields (2) + eq-true literal (1) all suppressed
+  lu.assertEquals(count_sites(result, "replace true with false"), 0)
+  lu.assertTrue(result.suppressed_equivalent >= 3)
+end
+
+function TestScanner:testDoesNotSuppressEqTrueOnOrdinaryTable()
+  local source = table.concat({
+    "local flags = { debug = true, verbose = true }\n",
+    "local function on(k)\n",
+    "  return flags[k] == true\n",
+    "end\n",
+    "return on\n",
+  })
+  local result = analyze(source)
+  -- three true→false sites remain (2 fields + 1 eq literal)
+  lu.assertEquals(count_sites(result, "replace true with false"), 3)
+end
+
+function TestScanner:testSuppressesNilStringAgainstTypeResultLocal()
+  local source = table.concat({
+    "local function f(v)\n",
+    "  local vt = type(v)\n",
+    "  if vt == \"nil\" then return false end\n",
+    "  return true\n",
+    "end\n",
+  })
+  local result = analyze(source)
+  lu.assertEquals(count_sites(result, "replace nil with nil"), 0)
+  lu.assertTrue(result.suppressed_equivalent >= 1)
+end
+
+function TestScanner:testDoesNotSuppressNilStringAgainstOrdinaryLocal()
+  local source = table.concat({
+    "local function f(name)\n",
+    "  if name == \"nil\" then return true end\n",
+    "  return false\n",
+    "end\n",
+  })
+  local result = analyze(source)
+  lu.assertEquals(count_sites(result, "replace nil with nil"), 1)
+end
+
+function TestScanner:testSuppressesTypeOfParamStringCompare()
+  local source = table.concat({
+    "local function f(value)\n",
+    "  if type(value) == \"string\" then return 1 end\n",
+    "  return 0\n",
+    "end\n",
+  })
+  local result = analyze(source)
+  -- both type(value)→nil and "string"→nil suppressed
+  lu.assertEquals(count_sites(result, "replace type(value) with nil"), 0)
+  lu.assertEquals(count_sites(result, "replace string with nil"), 0)
+  lu.assertTrue(result.suppressed_equivalent >= 2)
+end
+
+function TestScanner:testDoesNotSuppressTypeOfLocalStringCompare()
+  local source = table.concat({
+    "local function f(value)\n",
+    "  local ok, as_text = pcall(tostring, value)\n",
+    "  if ok and type(as_text) == \"string\" then return as_text end\n",
+    "  return nil\n",
+    "end\n",
+  })
+  local result = analyze(source)
+  lu.assertEquals(count_sites(result, "replace type(as_text) with nil"), 1)
+  lu.assertEquals(count_sites(result, "replace string with nil"), 1)
+end
+
+function TestScanner:testSuppressesTypenameCheckerCallToNil()
+  local source = table.concat({
+    "local names = { number = true, integer = true }\n",
+    "local function is_num_name(t)\n",
+    "  return names[t] == true\n",
+    "end\n",
+    "local function f(t)\n",
+    "  if is_num_name(t) then return true end\n",
+    "  return false\n",
+    "end\n",
+  })
+  local result = analyze(source)
+  lu.assertEquals(count_sites(result, "replace is_num_name(t) with nil"), 0)
+  lu.assertTrue(result.suppressed_equivalent >= 1)
+end
+
+function TestScanner:testDoesNotSuppressOrdinaryCallToNil()
+  local source = table.concat({
+    "local function is_ready(x)\n",
+    "  return x ~= nil\n",
+    "end\n",
+    "local function f(x)\n",
+    "  if is_ready(x) then return true end\n",
+    "  return false\n",
+    "end\n",
+  })
+  local result = analyze(source)
+  lu.assertEquals(count_sites(result, "replace is_ready(x) with nil"), 1)
+end
+
+function TestScanner:testReportsSuppressedEquivalentCount()
+  local result = analyze("local x = 1\nreturn x\n")
+  lu.assertEquals(result.suppressed_equivalent, 0)
+  lu.assertNotNil(result.suppressed_equivalent)
+end
+
+-- Gold standard: monopoly number.lua must suppress exactly the 9 F3
+-- equivalents and must not suppress the 26 load-phase killables. Source is
+-- vendored under tests/fixtures/ so the suite stays hermetic (no host tree).
+local function load_number_gold()
+  local path = "tests/fixtures/number_gold.lua"
+  local f = assert(io.open(path, "rb"), "missing " .. path)
+  local src = f:read("*a")
+  f:close()
+  return src
+end
+
+function TestScanner:testNumberLuaGoldStandardSuppressesNineEquivalents()
+  local result = analyze(load_number_gold())
+  -- Pre-suppress baseline is 92 sites; exactly the 9 F3 equivalents drop out.
+  lu.assertEquals(result.suppressed_equivalent, 9)
+  lu.assertEquals(#result.sites, 83)
+
+  local function has(line, original, replacement)
+    for _, site in ipairs(result.sites) do
+      if site.line == line and site.original_text == original
+        and site.replacement_text == replacement
+      then
+        return true
+      end
+    end
+    return false
+  end
+
+  -- 9 equivalents must be gone
+  lu.assertFalse(has(5, "true", "false"), "#2 number=true")
+  lu.assertFalse(has(6, "true", "false"), "#3 integer=true")
+  lu.assertFalse(has(7, "true", "false"), "#4 fixed=true")
+  lu.assertFalse(has(11, "true", "false"), "#6 == true")
+  lu.assertFalse(has(46, '"nil"', "nil"), "#21")
+  lu.assertFalse(has(49, "_is_numeric_type_name(value_type)", "nil"), "#23")
+  -- L76: start 1→0 gone, stop 1→0 remains (exactly one)
+  local l76_ones = 0
+  for _, site in ipairs(result.sites) do
+    if site.line == 76 and site.original_text == "1" and site.replacement_text == "0" then
+      l76_ones = l76_ones + 1
+    end
+  end
+  lu.assertEquals(l76_ones, 1, "#42 start suppressed, stop kept")
+  lu.assertFalse(has(100, "type(value)", "nil"), "#58")
+  lu.assertFalse(has(100, '"string"', "nil"), "#60")
+
+  -- Representative load-phase killables must remain
+  lu.assertTrue(has(3, "and", "or"), "#1")
+  lu.assertTrue(has(45, "type(value)", "nil"), "#19")
+  lu.assertTrue(has(47, "false", "true"), "#22")
+  lu.assertTrue(has(50, "true", "false"), "#24 return true")
+  lu.assertTrue(has(52, '"string"', "nil"), "#26")
+  lu.assertTrue(has(93, '"string"', "nil"), "inner type(as_text) string")
+end
+
 return TestScanner

@@ -577,11 +577,14 @@ local function _compute_surface_areas(selected_sites, old_manifest, changed_scop
   return differential, violating
 end
 
-local function _print_diagnostics(stdout, total, covered, uncovered, changed, manifest_exists, module_hash_changed, differential, violating)
+local function _print_diagnostics(stdout, total, covered, uncovered, changed, manifest_exists, module_hash_changed, differential, violating, suppressed_equivalent)
   stdout:write("total mutation sites: ", tostring(total), "\n")
   stdout:write("covered mutation sites: ", tostring(covered), "\n")
   stdout:write("uncovered mutation sites: ", tostring(uncovered), "\n")
   stdout:write("changed mutation sites: ", tostring(changed), "\n")
+  -- ADR-0001: constructively equivalent sites dropped at scan time. Always
+  -- printed (including 0) so a score jump has an audit trail.
+  stdout:write("suppressed equivalent sites: ", tostring(suppressed_equivalent or 0), "\n")
   stdout:write("manifest exists: ", manifest_exists and "yes" or "no", "\n")
   stdout:write("module hash changed: ", module_hash_changed and "yes" or "no", "\n")
   stdout:write("differential surface area: ", tostring(differential), "\n")
@@ -629,6 +632,7 @@ function engine.scan(options, env)
 
   stdout:write("file: ", data.relative_file, "\n")
   stdout:write("sites: ", tostring(#data.sites), "\n")
+  stdout:write("suppressed equivalent sites: ", tostring(data.suppressed_equivalent or 0), "\n")
   for _, site in ipairs(data.sites) do
     local prefix = (old_manifest and changed_scopes[site.scope_id]) and "* " or "  "
     stdout:write(prefix, "L", tostring(site.line), " ", site.description, " (scope: ", site.scope_id, ")\n")
@@ -792,7 +796,8 @@ function engine.mutate(options, env)
   local differential, violating = _compute_surface_areas(sites, old_manifest, changed_scopes)
 
   _print_diagnostics(stdout, total_sites, covered_count, uncovered_count, changed_count,
-    old_manifest ~= nil, module_hash_changed, differential, violating)
+    old_manifest ~= nil, module_hash_changed, differential, violating,
+    data.suppressed_equivalent or 0)
 
   if uncovered_count > 0 then
     local list = {}
