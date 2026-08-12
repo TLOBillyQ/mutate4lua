@@ -2,7 +2,7 @@ rockspec_format = "3.0"
 package = "mutate4lua"
 version = "0.2.1-1"
 source = {
-   url = "git+http://lzxsvn:3000/qinyuanj/mutate4lua.git",
+   url = "git+http://lzxsvn:3000/eggy/mutate4lua.git",
    tag = "v0.2.1",
 }
 description = {
@@ -13,7 +13,7 @@ description = {
       filtering. It is the Lua port of unclebob's clj-mutate / mutate4go /
       mutate4java tools.
    ]],
-   homepage = "http://lzxsvn:3000/qinyuanj/mutate4lua",
+   homepage = "http://lzxsvn:3000/eggy/mutate4lua",
    license = "MIT",
 }
 dependencies = {

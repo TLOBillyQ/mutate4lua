@@ -13,7 +13,7 @@ Uncle Bob 在三个语言生态中分别实现了变异测试工具，遵循相�
 |------|------|---------|------|
 | **mutate4go** | Go | `github.com/unclebob/mutate4go` | 独立二进制 CLI，标准 Go 测试 |
 | **clj-mutate** | Clojure | `github.com/unclebob/clj-mutate` | Speclj 绑定，`bb`/`clj` 启动 |
-| **mutate4lua** | Lua | `lzxsvn:3000/qinyuanj/mutate4lua` | 宿主无关纯库，Driver 契约 |
+| **mutate4lua** | Lua | `lzxsvn:3000/eggy/mutate4lua` | 宿主无关纯库，Driver 契约 |
 
 三个工具共享的核心流程：
 
