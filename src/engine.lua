@@ -740,7 +740,15 @@ function engine.mutate(options, env)
   local use_overlay = not options.test_command
   local shared_git_dir
   if use_overlay then
-    shared_git_dir = overlay.prepare_shared_git(workspace_root)
+    -- A nil return without error just means the source has no .git; an error
+    -- must abort, because populate would otherwise copy a .git pointer file
+    -- verbatim and the workspace's git would write through to the real repo.
+    local shared_git_err
+    shared_git_dir, shared_git_err = overlay.prepare_shared_git(workspace_root)
+    if shared_git_err then
+      stderr:write("error: ", shared_git_err, "\n")
+      return 1
+    end
   end
 
   local workspace, workspace_err = _create_workspace(workspace_root, relative, use_overlay, shared_git_dir)

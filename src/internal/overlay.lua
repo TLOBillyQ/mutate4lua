@@ -285,20 +285,92 @@ local function _build_overlay_command(source_dir, target_relative, workspace, sh
   return _build_fast_overlay_command(abs_src, target_relative, abs_ws, shared_git_dir)
 end
 
+-- Resolves a gitdir pointer value — the `gitdir:` line of a linked-worktree
+-- .git file, or the content of a worktree admin directory's `commondir` file
+-- — against base_dir. Returns the absolute admin directory path, or nil when
+-- the value is empty or does not resolve to an existing directory.
+local function _resolve_gitdir_pointer(pointer, base_dir)
+  local target = util.trim(tostring(pointer or ""))
+  if target == "" then
+    return nil
+  end
+  if not _is_absolute_path(target) then
+    target = util.join_path(base_dir, target)
+  end
+  target = util.absolute_path(target)
+  if not util.is_directory(target) then
+    return nil
+  end
+  return target
+end
+
+-- Reads a `gitdir:` pointer file (the `.git` form of linked worktrees and
+-- separate-git-dir checkouts) and returns the absolute path of the admin
+-- directory it references, or nil.
+local function _read_gitdir_target(git_file, base_dir)
+  local content = util.read_file(git_file)
+  if not content then
+    return nil
+  end
+  return _resolve_gitdir_pointer(content:match("^gitdir:%s*(.-)%s*$"), base_dir)
+end
+
 -- Create a shared, real copy of the source .git directory that multiple
 -- workspaces can reference via gitdir files. Returns the shared directory path,
 -- or nil if the source has no .git directory.
+--
+-- When the source's .git is a pointer file (linked worktree), the referenced
+-- admin directory is copied instead, and the copy is made self-contained: the
+-- worktree admin part (HEAD, index) stays at the shared root, the common part
+-- (objects, refs) is copied to `common/` inside it, and `commondir` is
+-- redirected there so git inside the workspace never reaches the real
+-- repository. The stale `gitdir` back-pointer to the real worktree is dropped
+-- for the same reason.
 function overlay.prepare_shared_git(source_dir)
   source_dir = util.absolute_path(source_dir)
   local git_source = util.join_path(source_dir, ".git")
   if not util.path_exists(git_source) then
     return nil
   end
+
+  local admin_dir = git_source
+  local common_dir
+  if util.is_file(git_source) then
+    admin_dir = _read_gitdir_target(git_source, source_dir)
+    if not admin_dir then
+      return nil, "failed to resolve .git pointer file"
+    end
+    local commondir = util.read_file(util.join_path(admin_dir, "commondir"))
+    if commondir then
+      common_dir = _resolve_gitdir_pointer(commondir, admin_dir)
+      if not common_dir then
+        return nil, "failed to resolve worktree commondir"
+      end
+    end
+  end
+
   local shared = util.tmp_path("_git")
   util.remove(shared)
-  if not util.command_succeeds(_copy_git(git_source, shared)) then
+  if not util.command_succeeds(_copy_git(admin_dir, shared)) then
+    util.remove(shared)
     return nil, "failed to copy .git directory"
   end
+
+  if common_dir then
+    util.remove(util.join_path(shared, "common"))
+    if not util.command_succeeds(_copy_git(common_dir, util.join_path(shared, "common"))) then
+      util.remove(shared)
+      return nil, "failed to copy .git common directory"
+    end
+    -- Leaving the original `../..` value in place would resolve outside the
+    -- copy, so a failed rewrite must fail the whole preparation.
+    if not util.write_file(util.join_path(shared, "commondir"), "common\n") then
+      util.remove(shared)
+      return nil, "failed to redirect commondir inside the shared .git copy"
+    end
+    util.remove(util.join_path(shared, "gitdir"))
+  end
+
   return shared
 end
 
@@ -333,6 +405,10 @@ function overlay.create(source_dir, target_relative)
   util.remove(workspace)
   util.mkdir_p(workspace)
   local shared_git, git_err = overlay.prepare_shared_git(source_dir)
+  if git_err then
+    util.remove(workspace)
+    return nil, git_err
+  end
   local ok, err = overlay.populate(source_dir, target_relative, workspace, shared_git)
   if shared_git then
     util.remove(shared_git)

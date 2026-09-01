@@ -167,4 +167,66 @@ function TestOverlay:testPopulateManyCreatesIndependentWorkspaces()
   end
 end
 
+function TestOverlay:testSharedGitSupportsLinkedWorktreeGitFile()
+  -- Linked worktree source: its .git is a `gitdir:` pointer file, not a
+  -- directory (regression test for the shared-git copy treating it as one).
+  local main_repo = tmp_dir()
+  local function sh(command)
+    assert(util.command_succeeds(command .. " 2>/dev/null"), command)
+  end
+
+  sh("git init -q " .. util.shell_quote(main_repo))
+  sh("git -C " .. util.shell_quote(main_repo) .. " config user.email t@example.com")
+  sh("git -C " .. util.shell_quote(main_repo) .. " config user.name tester")
+  util.mkdir_p(util.join_path(main_repo, "src"))
+  write_file(util.join_path(main_repo, "src", "a.lua"), "return 1\n")
+  sh("git -C " .. util.shell_quote(main_repo) .. " add -A")
+  sh("git -C " .. util.shell_quote(main_repo) .. " commit -qm init")
+  -- worktree add creates the directory itself.
+  rm_rf(self.source)
+  sh("git -C " .. util.shell_quote(main_repo) .. " worktree add -q "
+    .. util.shell_quote(self.source) .. " -b wt-branch")
+  write_file(util.join_path(self.source, "src", "b.lua"), "return 2\n")
+  sh("git -C " .. util.shell_quote(self.source) .. " add -A")
+  sh("git -C " .. util.shell_quote(self.source) .. " commit -qm wt-commit")
+  lu.assertTrue(util.is_file(util.join_path(self.source, ".git")))
+
+  -- Engine flow: the shared git dir stays alive while the workspace is used.
+  local shared_git, git_err = overlay.prepare_shared_git(self.source)
+  lu.assertNotNil(shared_git, git_err)
+  lu.assertTrue(util.is_directory(shared_git))
+  local ws = util.tmp_path("_ws")
+  util.remove(ws)
+  local ok, err = overlay.populate(self.source, "src/a.lua", ws, shared_git)
+  lu.assertTrue(ok, err)
+  local ws_q = util.shell_quote(ws)
+
+  -- Git resolves inside the workspace, using the worktree's index and HEAD.
+  local files = util.capture("git -C " .. ws_q .. " ls-files")
+  lu.assertNotNil(files, "git ls-files failed in workspace")
+  lu.assertStrContains(files, "src/a.lua")
+  lu.assertStrContains(files, "src/b.lua")
+  local branch = util.trim(assert(util.capture("git -C " .. ws_q .. " rev-parse --abbrev-ref HEAD")))
+  lu.assertEquals(branch, "wt-branch")
+  -- The commondir redirect is the core of the fix: the common dir must be the
+  -- copy inside shared_git, never the real repository's admin directory.
+  -- (Match by basename: git may resolve the /tmp symlink to /private/tmp.)
+  local common_dir = util.trim(assert(util.capture("git -C " .. ws_q .. " rev-parse --git-common-dir")))
+  lu.assertStrContains(common_dir, util.basename(shared_git))
+
+  -- Git writes in the workspace must not reach the real repository.
+  write_file(util.join_path(ws, "src", "a.lua"), "return 99\n")
+  sh("git -C " .. ws_q .. " add src/a.lua")
+  sh("git -C " .. ws_q .. " commit -qm workspace-commit")
+  local real_status = assert(util.capture("git -C " .. util.shell_quote(self.source) .. " status --porcelain"))
+  lu.assertEquals(real_status, "")
+  local real_head = util.trim(assert(util.capture("git -C " .. util.shell_quote(main_repo) .. " rev-parse wt-branch")))
+  local ws_head = util.trim(assert(util.capture("git -C " .. ws_q .. " rev-parse HEAD")))
+  lu.assertNotEquals(real_head, ws_head)
+
+  rm_rf(ws)
+  util.remove(shared_git)
+  rm_rf(main_repo)
+end
+
 return TestOverlay
